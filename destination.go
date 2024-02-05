@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
@@ -13,13 +15,14 @@ type Destination struct {
 	sdk.UnimplementedDestination
 
 	config DestinationConfig
+
+	// KinesisClient is the Client for the AWS Kinesis API
+	KinesisClient *kinesis.Client
 }
 
 type DestinationConfig struct {
 	// Config includes parameters that are the same in the source and destination.
 	Config
-	// DestinationConfigParam must be either yes or no (defaults to yes).
-	DestinationConfigParam string `validate:"inclusion=yes|no" default:"yes"`
 }
 
 func NewDestination() sdk.Destination {
@@ -49,6 +52,11 @@ func (d *Destination) Configure(ctx context.Context, cfg map[string]string) erro
 	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
+
+	d.KinesisClient = kinesis.New(kinesis.Options{
+		Region: d.config.AWSRegion,
+	})
+
 	return nil
 }
 
@@ -56,6 +64,16 @@ func (d *Destination) Open(ctx context.Context) error {
 	// Open is called after Configure to signal the plugin it can prepare to
 	// start writing records. If needed, the plugin should open connections in
 	// this function.
+	stream, err := d.KinesisClient.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+		StreamARN: &d.config.StreamARN,
+	})
+	if err != nil {
+		sdk.Logger(ctx).Error().Msg("error when attempting to describe stream")
+		return err
+	}
+
+	d.config.StreamName = *stream.StreamDescription.StreamName
+
 	return nil
 }
 
@@ -64,6 +82,14 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 	// caching. It should return the number of records written from r
 	// (0 <= n <= len(r)) and any error encountered that caused the write to
 	// stop early. Write must return a non-nil error if it returns n < len(r).
+
+	// Kinesis put records requests have a size limit of 5 MB per request, 1 MB per record,
+	// and a count limit of 500 records, so generate the records requests first
+
+	d.KinesisClient.PutRecords(ctx, &kinesis.PutRecordsInput{
+		StreamARN: &d.config.StreamARN,
+		Records:   []types.PutRecordsRequestEntry{},
+	})
 	return 0, nil
 }
 
