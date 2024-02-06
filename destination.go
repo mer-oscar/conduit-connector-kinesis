@@ -68,7 +68,7 @@ func (d *Destination) Open(ctx context.Context) error {
 		StreamARN: &d.config.StreamARN,
 	})
 	if err != nil {
-		sdk.Logger(ctx).Error().Msg("error when attempting to describe stream")
+		sdk.Logger(ctx).Error().Msg("error when attempting to test connection to stream")
 		return err
 	}
 
@@ -84,18 +84,73 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 	// stop early. Write must return a non-nil error if it returns n < len(r).
 
 	// Kinesis put records requests have a size limit of 5 MB per request, 1 MB per record,
-	// and a count limit of 500 records, so generate the records requests first
+	// and a count limit of 500 records per request, so generate the records requests first
+	var entries []types.PutRecordsRequestEntry
+	var reqs []*kinesis.PutRecordsInput
+	var mib5 int = 5 << (10 * 2)
 
-	d.KinesisClient.PutRecords(ctx, &kinesis.PutRecordsInput{
-		StreamARN: &d.config.StreamARN,
-		Records:   []types.PutRecordsRequestEntry{},
-	})
-	return 0, nil
+	sizeLimit := mib5
+
+	for j := 0; j < len(records); j++ {
+		sizeLimit -= len(records[j].Bytes())
+
+		if sizeLimit <= 0 {
+			reqs = append(reqs, &kinesis.PutRecordsInput{
+				StreamARN: &d.config.StreamARN,
+				Records:   entries,
+			})
+
+			sizeLimit = mib5
+			entries = []types.PutRecordsRequestEntry{}
+
+			j--
+
+			continue
+		}
+
+		key := string(records[j].Key.Bytes())
+
+		recordEntry := types.PutRecordsRequestEntry{
+			Data:         records[j].Bytes(),
+			PartitionKey: &key,
+		}
+		entries = append(entries, recordEntry)
+
+		if len(entries) == 500 {
+			reqs = append(reqs, &kinesis.PutRecordsInput{
+				StreamARN: &d.config.StreamARN,
+				Records:   entries,
+			})
+			sizeLimit = mib5
+			entries = []types.PutRecordsRequestEntry{}
+		}
+	}
+
+	var errored, written int
+
+	for _, req := range reqs {
+		output, err := d.KinesisClient.PutRecords(ctx, req)
+		if err != nil {
+			// handle error
+			for _, resp := range output.Records {
+				if resp.ErrorCode != nil {
+					errored++
+				}
+			}
+
+			return len(output.Records) - errored, err
+		}
+
+		written = len(output.Records)
+	}
+
+	return written - errored, nil
 }
 
 func (d *Destination) Teardown(ctx context.Context) error {
 	// Teardown signals to the plugin that all records were written and there
 	// will be no more calls to any other function. After Teardown returns, the
 	// plugin should be ready for a graceful shutdown.
+
 	return nil
 }

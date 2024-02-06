@@ -18,7 +18,7 @@ func TestTeardown_NoOpen(t *testing.T) {
 func TestTeardown_Open(t *testing.T) {
 	is := is.New(t)
 	con := kinesis.NewDestination()
-	err := con.Open(ctx)
+	err := con.Open(context.Background())
 	is.NoErr(err)
 	err = con.Teardown(context.Background())
 	is.NoErr(err)
