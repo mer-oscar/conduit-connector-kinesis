@@ -12,15 +12,12 @@ import (
 type Source struct {
 	sdk.UnimplementedSource
 
-	config           SourceConfig
-	lastPositionRead sdk.Position //nolint:unused // this is just an example
+	config SourceConfig
 }
 
 type SourceConfig struct {
 	// Config includes parameters that are the same in the source and destination.
 	Config
-	// SourceConfigParam is named foo and must be provided by the user.
-	SourceConfigParam string `json:"foo" validate:"required"`
 }
 
 func NewSource() sdk.Source {

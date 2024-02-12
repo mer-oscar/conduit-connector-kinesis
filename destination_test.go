@@ -58,44 +58,62 @@ func TestTeardown_Open(t *testing.T) {
 	is.NoErr(err)
 }
 
-func setupWriteTest(t *testing.T, useSingleShard bool) kinesis.Destination {
+func setupWriteTest(t *testing.T, useSingleShard bool) (kinesis.Destination, *client.MockKinesisClient) {
 	con := kinesis.Destination{}
 	ctrl := gomock.NewController(t)
 	mockClient := client.NewMockKinesisClient(ctrl)
-	destConfig := kinesis.DestinationConfig{}
-
-	_ = sdk.Util.ParseConfig(cfg, &destConfig)
 	con.Client = mockClient
-	destConfig.UseSingleShard = useSingleShard
-	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
 
-	return con
+	return con, mockClient
 }
 
 func TestWrite_PutRecords(t *testing.T) {
 	ctx := context.Background()
 	is := is.New(t)
-	con := setupWriteTest(t, false)
+	con, client := setupWriteTest(t, false)
+
+	destConfig := kinesis.DestinationConfig{}
+
+	_ = sdk.Util.ParseConfig(cfg, &destConfig)
+	destConfig.UseSingleShard = false
+	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
 
 	cases := []struct {
 		testName                 string
-		isErr                    bool
+		expectedError            error
 		expectedNumberOfRequests int
 		records                  []sdk.Record
 	}{
 		{
 			"happy path - <500 records",
-			false,
+			nil,
 			1,
 			makeRecords(499, false),
 		},
 	}
+	var failedCount int32
+
 	// setup table test
 	for _, tt := range cases {
 		t.Run(tt.testName, func(t *testing.T) {
-			count, err := con.Write(ctx, tt.records)
-			if tt.isErr {
+			var err error
+			if tt.expectedError != nil {
 				// handle err
+				err = tt.expectedError
+			}
+
+			kRecs := make([]types.PutRecordsResultEntry, len(tt.records))
+
+			client.EXPECT().PutRecords(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.expectedNumberOfRequests).
+				Return(&aws.PutRecordsOutput{
+					Records:           kRecs,
+					FailedRecordCount: &failedCount,
+				}, err)
+
+			count, err := con.Write(ctx, tt.records)
+			if err != nil {
+				// handle err
+				is.Equal(err, tt.expectedError)
 			}
 
 			is.NoErr(err)
@@ -104,18 +122,54 @@ func TestWrite_PutRecords(t *testing.T) {
 	}
 }
 
-// func TestWrite_PutRecord(t *testing.T) {
-// 	ctx := context.Background()
-// 	is := is.New(t)
-// 	con := setupWriteTest(t, true)
+func TestWrite_PutRecord(t *testing.T) {
+	ctx := context.Background()
+	is := is.New(t)
+	con, client := setupWriteTest(t, false)
 
-// 	cases := []struct {
-// 		records []sdk.Record
-// 	}{}
+	destConfig := kinesis.DestinationConfig{}
 
-// 	// setup table test
-// 	count, err := con.Write(ctx)
-// }
+	_ = sdk.Util.ParseConfig(cfg, &destConfig)
+	destConfig.UseSingleShard = true
+	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
+
+	cases := []struct {
+		testName                 string
+		expectedError            error
+		expectedNumberOfRequests int
+		records                  []sdk.Record
+	}{
+		{
+			"happy path - <500 records",
+			nil,
+			499,
+			makeRecords(499, false),
+		},
+	}
+
+	// setup table test
+	for _, tt := range cases {
+		t.Run(tt.testName, func(t *testing.T) {
+			var err error
+			if tt.expectedError != nil {
+				// handle err
+				err = tt.expectedError
+			}
+
+			client.EXPECT().PutRecord(gomock.Any(), gomock.Any(), gomock.Any()).Times(tt.expectedNumberOfRequests).
+				Return(&aws.PutRecordOutput{}, err)
+
+			count, err := con.Write(ctx, tt.records)
+			if err != nil {
+				// handle err
+				is.Equal(err, tt.expectedError)
+			}
+
+			is.NoErr(err)
+			is.Equal(count, len(tt.records))
+		})
+	}
+}
 
 func makeRecords(count int, greaterThan5MB bool) []sdk.Record {
 	var records []sdk.Record
@@ -134,4 +188,19 @@ func makeRecords(count int, greaterThan5MB bool) []sdk.Record {
 		records = append(records, rec)
 	}
 	return records
+}
+
+func toKinesisRecords(records []sdk.Record) []types.PutRecordsRequestEntry {
+	var kinesisRecs []types.PutRecordsRequestEntry
+	for _, rec := range records {
+		key := string(rec.Key.Bytes())
+		kRec := types.PutRecordsRequestEntry{
+			Data:         rec.Bytes(),
+			PartitionKey: &key,
+		}
+
+		kinesisRecs = append(kinesisRecs, kRec)
+	}
+
+	return kinesisRecs
 }

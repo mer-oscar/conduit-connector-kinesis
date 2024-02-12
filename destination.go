@@ -30,7 +30,7 @@ type DestinationConfig struct {
 	// or to add records to a single shard using KinesisClient.PutRecord
 	// (preserves ordering, records written to a single shard)
 	// Defaults to false to take advantage of batch put records request
-	UseSingleShard bool `json:"use_single_shard" validate:"required" default:"false"`
+	UseSingleShard bool `json:"use_single_shard" validate:"required" default:"true"`
 }
 
 func NewDestination() sdk.Destination {
@@ -179,6 +179,13 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 		}
 	}
 
+	// out of the loop so append any entries to a request
+	reqs = append(reqs, &kinesis.PutRecordsInput{
+		StreamARN:  &d.config.StreamARN,
+		StreamName: &d.config.StreamName,
+		Records:    entries,
+	})
+
 	var written int
 
 	// iterate through the PutRecords response and sum the successful record writes
@@ -186,11 +193,7 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 	for _, req := range reqs {
 		output, err := d.Client.PutRecords(ctx, req)
 		if err != nil {
-			for _, rec := range output.Records {
-				if rec.ErrorCode == nil {
-					written += len(output.Records)
-				}
-			}
+			written += len(output.Records) - int(*output.FailedRecordCount)
 			return written, err
 		}
 
