@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/matryer/is"
 	kinesis "github.com/mer-oscar/conduit-connector-kinesis"
-	client "github.com/mer-oscar/conduit-connector-kinesis/test"
+	test "github.com/mer-oscar/conduit-connector-kinesis/test"
 	"go.uber.org/mock/gomock"
 )
 
@@ -34,7 +34,7 @@ func TestTeardown_Open(t *testing.T) {
 	con := kinesis.Destination{}
 
 	ctrl := gomock.NewController(t)
-	mockClient := client.NewMockKinesisClient(ctrl)
+	mockClient := test.NewMockKinesisClient(ctrl)
 
 	destConfig := kinesis.DestinationConfig{}
 
@@ -58,25 +58,16 @@ func TestTeardown_Open(t *testing.T) {
 	is.NoErr(err)
 }
 
-func setupWriteTest(t *testing.T, useSingleShard bool) (kinesis.Destination, *client.MockKinesisClient) {
-	con := kinesis.Destination{}
-	ctrl := gomock.NewController(t)
-	mockClient := client.NewMockKinesisClient(ctrl)
-	con.Client = mockClient
-
-	return con, mockClient
-}
-
 func TestWrite_PutRecords(t *testing.T) {
 	ctx := context.Background()
 	is := is.New(t)
-	con, client := setupWriteTest(t, false)
+	con := kinesis.Destination{}
+	ctrl := gomock.NewController(t)
+	client := test.NewMockKinesisClient(ctrl)
 
-	destConfig := kinesis.DestinationConfig{}
-
-	_ = sdk.Util.ParseConfig(cfg, &destConfig)
-	destConfig.UseSingleShard = false
-	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
+	err := con.Configure(ctx, cfg)
+	is.NoErr(err)
+	con.Client = client
 
 	cases := []struct {
 		testName                 string
@@ -125,13 +116,22 @@ func TestWrite_PutRecords(t *testing.T) {
 func TestWrite_PutRecord(t *testing.T) {
 	ctx := context.Background()
 	is := is.New(t)
-	con, client := setupWriteTest(t, false)
 
 	destConfig := kinesis.DestinationConfig{}
 
 	_ = sdk.Util.ParseConfig(cfg, &destConfig)
 	destConfig.UseSingleShard = true
 	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
+
+	con := kinesis.Destination{}
+	ctrl := gomock.NewController(t)
+	client := test.NewMockKinesisClient(ctrl)
+
+	cfg["use_single_shard"] = "true"
+
+	err := con.Configure(ctx, cfg)
+	is.NoErr(err)
+	con.Client = client
 
 	cases := []struct {
 		testName                 string
