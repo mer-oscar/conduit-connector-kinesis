@@ -9,5 +9,5 @@ type Config struct {
 	// StreamName is the name of the Kinesis Data Stream
 	StreamName string `json:"stream_name"`
 	// AWSRegion is the region where the stream is hosted
-	AWSRegion string `json:"aws_region"`
+	AWSRegion string `json:"aws_region" validate:"required"`
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
+	"github.com/google/uuid"
 )
 
 type Destination struct {
@@ -16,13 +17,20 @@ type Destination struct {
 
 	config DestinationConfig
 
-	// KinesisClient is the Client for the AWS Kinesis API
-	KinesisClient *kinesis.Client
+	// client is the Client for the AWS Kinesis API
+	Client KinesisClient
 }
 
 type DestinationConfig struct {
 	// Config includes parameters that are the same in the source and destination.
 	Config
+
+	// UseSingleShard is a boolean that determines whether to add records in batches using KinesisClient.PutRecords
+	// (ordering not guaranteed, records written to multiple shards)
+	// or to add records to a single shard using KinesisClient.PutRecord
+	// (preserves ordering, records written to a single shard)
+	// Defaults to false to take advantage of batch put records request
+	UseSingleShard bool `json:"use_single_shard" validate:"required" default:"false"`
 }
 
 func NewDestination() sdk.Destination {
@@ -46,14 +54,13 @@ func (d *Destination) Configure(ctx context.Context, cfg map[string]string) erro
 	// The SDK will validate the configuration and populate default values
 	// before calling Configure. If you need to do more complex validations you
 	// can do them manually here.
-
 	sdk.Logger(ctx).Info().Msg("Configuring Destination...")
 	err := sdk.Util.ParseConfig(cfg, &d.config)
 	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	d.KinesisClient = kinesis.New(kinesis.Options{
+	d.Client = kinesis.New(kinesis.Options{
 		Region: d.config.AWSRegion,
 	})
 
@@ -64,7 +71,9 @@ func (d *Destination) Open(ctx context.Context) error {
 	// Open is called after Configure to signal the plugin it can prepare to
 	// start writing records. If needed, the plugin should open connections in
 	// this function.
-	stream, err := d.KinesisClient.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+
+	// DescribeStream to know that the stream ARN is valid and usable, ie test connection
+	stream, err := d.Client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamARN: &d.config.StreamARN,
 	})
 	if err != nil {
@@ -72,6 +81,7 @@ func (d *Destination) Open(ctx context.Context) error {
 		return err
 	}
 
+	// add the stream name with requests also
 	d.config.StreamName = *stream.StreamDescription.StreamName
 
 	return nil
@@ -83,6 +93,45 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 	// (0 <= n <= len(r)) and any error encountered that caused the write to
 	// stop early. Write must return a non-nil error if it returns n < len(r).
 
+	if d.config.UseSingleShard {
+		return d.putRecord(ctx, records)
+	}
+
+	return d.putRecords(ctx, records)
+}
+
+func (d *Destination) Teardown(ctx context.Context) error {
+	// Teardown signals to the plugin that all records were written and there
+	// will be no more calls to any other function. After Teardown returns, the
+	// plugin should be ready for a graceful shutdown.
+	if d.Client != nil {
+		d.Client = nil
+	}
+
+	return nil
+}
+
+func (d *Destination) putRecord(ctx context.Context, records []sdk.Record) (int, error) {
+	partition := uuid.New().String()
+	var count int
+	for _, record := range records {
+		_, err := d.Client.PutRecord(ctx, &kinesis.PutRecordInput{
+			PartitionKey: &partition,
+			Data:         record.Bytes(),
+			StreamARN:    &d.config.StreamARN,
+			StreamName:   &d.config.StreamName,
+		})
+		if err != nil {
+			return count, err
+		}
+
+		count++
+	}
+
+	return count, nil
+}
+
+func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int, error) {
 	// Kinesis put records requests have a size limit of 5 MB per request, 1 MB per record,
 	// and a count limit of 500 records per request, so generate the records requests first
 	var entries []types.PutRecordsRequestEntry
@@ -91,13 +140,16 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 	sizeLimit := mib5
 
+	// create the bulk put records request
 	for j := 0; j < len(records); j++ {
 		sizeLimit -= len(records[j].Bytes())
 
+		// size limit reached
 		if sizeLimit <= 0 {
 			reqs = append(reqs, &kinesis.PutRecordsInput{
-				StreamARN: &d.config.StreamARN,
-				Records:   entries,
+				StreamARN:  &d.config.StreamARN,
+				StreamName: &d.config.StreamName,
+				Records:    entries,
 			})
 
 			sizeLimit = mib5
@@ -118,39 +170,32 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 		if len(entries) == 500 {
 			reqs = append(reqs, &kinesis.PutRecordsInput{
-				StreamARN: &d.config.StreamARN,
-				Records:   entries,
+				StreamARN:  &d.config.StreamARN,
+				StreamName: &d.config.StreamName,
+				Records:    entries,
 			})
 			sizeLimit = mib5
 			entries = []types.PutRecordsRequestEntry{}
 		}
 	}
 
-	var errored, written int
+	var written int
 
+	// iterate through the PutRecords response and sum the successful record writes
+	// over the entire batch of requests
 	for _, req := range reqs {
-		output, err := d.KinesisClient.PutRecords(ctx, req)
+		output, err := d.Client.PutRecords(ctx, req)
 		if err != nil {
-			// handle error
-			for _, resp := range output.Records {
-				if resp.ErrorCode != nil {
-					errored++
+			for _, rec := range output.Records {
+				if rec.ErrorCode == nil {
+					written += len(output.Records)
 				}
 			}
-
-			return len(output.Records) - errored, err
+			return written, err
 		}
 
-		written = len(output.Records)
+		written += len(output.Records)
 	}
 
-	return written - errored, nil
-}
-
-func (d *Destination) Teardown(ctx context.Context) error {
-	// Teardown signals to the plugin that all records were written and there
-	// will be no more calls to any other function. After Teardown returns, the
-	// plugin should be ready for a graceful shutdown.
-
-	return nil
+	return written, nil
 }
