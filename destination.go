@@ -12,6 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	defaultBatchSize = 500
+)
+
 type Destination struct {
 	sdk.UnimplementedDestination
 
@@ -29,13 +33,23 @@ type DestinationConfig struct {
 	// (ordering not guaranteed, records written to multiple shards)
 	// or to add records to a single shard using KinesisClient.PutRecord
 	// (preserves ordering, records written to a single shard)
-	// Defaults to false to take advantage of batch put records request
+	// Defaults to false to take advantage of batching performance
 	UseSingleShard bool `json:"use_single_shard" validate:"required" default:"true"`
 }
 
+// NewDestination creates a Destination and wrap it in the default middleware.
 func NewDestination() sdk.Destination {
-	// Create Destination and wrap it in the default middleware.
-	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware()...)
+	middlewares := sdk.DefaultDestinationMiddleware()
+	for i, m := range middlewares {
+		switch dest := m.(type) {
+		case sdk.DestinationWithBatch:
+			dest.DefaultBatchSize = defaultBatchSize
+			middlewares[i] = dest
+		default:
+		}
+	}
+
+	return sdk.DestinationWithMiddleware(&Destination{}, middlewares...)
 }
 
 func (d *Destination) Parameters() map[string]sdk.Parameter {
@@ -137,11 +151,17 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 	var entries []types.PutRecordsRequestEntry
 	var reqs []*kinesis.PutRecordsInput
 	var mib5 int = 5 << (10 * 2)
+	var mib1 int = 1 << (10 * 2)
 
 	sizeLimit := mib5
 
-	// create the bulk put records request
+	// create the put records request
 	for j := 0; j < len(records); j++ {
+		if len(records[j].Bytes()) > mib1 {
+			sdk.Logger(ctx).Error().Msg("record: " + string(records[j].Key.Bytes()) + " larger than 1MB, skipping...")
+			continue
+		}
+
 		sizeLimit -= len(records[j].Bytes())
 
 		// size limit reached
@@ -161,25 +181,17 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 		}
 
 		key := string(records[j].Key.Bytes())
-
 		recordEntry := types.PutRecordsRequestEntry{
 			Data:         records[j].Bytes(),
 			PartitionKey: &key,
 		}
 		entries = append(entries, recordEntry)
-
-		if len(entries) == 500 {
-			reqs = append(reqs, &kinesis.PutRecordsInput{
-				StreamARN:  &d.config.StreamARN,
-				StreamName: &d.config.StreamName,
-				Records:    entries,
-			})
-			sizeLimit = mib5
-			entries = []types.PutRecordsRequestEntry{}
-		}
 	}
 
-	// out of the loop so append any entries to a request
+	if len(entries) == 0 {
+		return 0, fmt.Errorf("records were too big to insert")
+	}
+
 	reqs = append(reqs, &kinesis.PutRecordsInput{
 		StreamARN:  &d.config.StreamARN,
 		StreamName: &d.config.StreamName,
@@ -196,7 +208,6 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 			written += len(output.Records) - int(*output.FailedRecordCount)
 			return written, err
 		}
-
 		written += len(output.Records)
 	}
 
