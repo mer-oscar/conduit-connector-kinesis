@@ -1,11 +1,12 @@
-package kinesis
-
-//go:generate paramgen -output=paramgen_src.go SourceConfig
+package source
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
@@ -13,6 +14,9 @@ type Source struct {
 	sdk.UnimplementedSource
 
 	config SourceConfig
+
+	// client is the Client for the AWS Kinesis API
+	client *kinesis.Client
 }
 
 type SourceConfig struct {
@@ -28,7 +32,7 @@ func NewSource() sdk.Source {
 func (s *Source) Parameters() map[string]sdk.Parameter {
 	// Parameters is a map of named Parameters that describe how to configure
 	// the Source. Parameters can be generated from SourceConfig with paramgen.
-	return s.config.Parameters()
+	return Config{}.Parameters()
 }
 
 func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
@@ -56,6 +60,31 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	// last record that was successfully processed, Source should therefore
 	// start producing records after this position. The context passed to Open
 	// will be cancelled once the plugin receives a stop signal from Conduit.
+
+	// Configure the creds for the client
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(s.config.AWSRegion),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				s.config.AWSAccessKeyID,
+				s.config.AWSSecretAccessKey,
+				"")),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
+	}
+
+	s.client = kinesis.NewFromConfig(cfg)
+
+	// DescribeStream to know that the stream ARN is valid and usable, ie test connection
+	_, err = s.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+		StreamARN: &s.config.StreamARN,
+	})
+	if err != nil {
+		sdk.Logger(ctx).Error().Msg("error when attempting to test connection to stream")
+		return err
+	}
+
 	return nil
 }
 

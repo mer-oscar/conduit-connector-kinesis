@@ -1,16 +1,15 @@
-package kinesis_test
+package source
 
 import (
 	"context"
 	"testing"
 
-	kinesis "github.com/mer-oscar/conduit-connector-kinesis"
 	"github.com/matryer/is"
 )
 
 func TestTeardownSource_NoOpen(t *testing.T) {
 	is := is.New(t)
-	con := kinesis.NewSource()
+	con := NewSource()
 	err := con.Teardown(context.Background())
 	is.NoErr(err)
 }
