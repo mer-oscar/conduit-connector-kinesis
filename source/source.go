@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
@@ -17,6 +19,8 @@ type Source struct {
 
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
+
+	eventStreams []*kinesis.SubscribeToShardEventStream
 }
 
 type SourceConfig struct {
@@ -85,6 +89,38 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		return err
 	}
 
+	// register consumer
+	consumerResponse, err := s.client.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
+		StreamARN:    &s.config.StreamARN,
+		ConsumerName: aws.String("conduit-connector-source"),
+	})
+	if err != nil {
+		return fmt.Errorf("error registering consumer: %w", err)
+	}
+
+	// get shards
+	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
+		StreamARN: &s.config.StreamARN,
+	})
+	if err != nil {
+		return fmt.Errorf("error retrieving kinesis shards: %w", err)
+	}
+
+	// get iterators for shards
+	for _, shard := range listShardsResponse.Shards {
+		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
+			ConsumerARN: consumerResponse.Consumer.ConsumerARN,
+			ShardId:     shard.ShardId,
+			// read from the oldest untrimmed record
+			StartingPosition: &types.StartingPosition{Type: types.ShardIteratorTypeTrimHorizon},
+		})
+		if err != nil {
+			return fmt.Errorf("error creating stream subscription: %w", err)
+		}
+
+		s.eventStreams = append(s.eventStreams, subscriptionResponse.GetStream())
+	}
+
 	return nil
 }
 
@@ -103,6 +139,33 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// After Read returns an error the function won't be called again (except if
 	// the error is ErrBackoffRetry, as mentioned above).
 	// Read can be called concurrently with Ack.
+	for _, stream := range s.eventStreams {
+		if len(stream.Events()) == 0 {
+			continue
+		}
+
+		for event := range stream.Events() {
+			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+
+			if eventValue.MillisBehindLatest == aws.Int64(0) {
+				break
+			}
+
+			eventRec := eventValue.Records[0]
+			position := *eventRec.PartitionKey + "_" + *eventRec.SequenceNumber
+
+			rec := sdk.Util.Source.NewRecordCreate(
+				sdk.Position(position),
+				sdk.Metadata{
+					"partitionKey": *eventRec.PartitionKey,
+				},
+				sdk.RawData(*eventRec.SequenceNumber),
+				sdk.RawData(eventRec.Data),
+			)
+			return rec, nil
+		}
+	}
+
 	return sdk.Record{}, nil
 }
 

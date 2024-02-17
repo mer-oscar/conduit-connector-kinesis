@@ -99,67 +99,30 @@ func (d *Destination) Open(ctx context.Context) error {
 
 func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, error) {
 	if d.config.UseSingleShard {
-		return d.putRecord(ctx, records)
-	}
+		partition := uuid.New().String()
+		var count int
+		for _, record := range records {
+			_, err := d.client.PutRecord(ctx, &kinesis.PutRecordInput{
+				PartitionKey: &partition,
+				Data:         record.Bytes(),
+				StreamARN:    &d.config.StreamARN,
+				StreamName:   &d.config.StreamName,
+			})
+			if err != nil {
+				return count, err
+			}
 
-	return d.putRecords(ctx, records)
-}
-
-func (d *Destination) Teardown(ctx context.Context) error {
-	// no shutdown required
-
-	return nil
-}
-
-func (d *Destination) putRecord(ctx context.Context, records []sdk.Record) (int, error) {
-	partition := uuid.New().String()
-	var count int
-	for _, record := range records {
-		_, err := d.client.PutRecord(ctx, &kinesis.PutRecordInput{
-			PartitionKey: &partition,
-			Data:         record.Bytes(),
-			StreamARN:    &d.config.StreamARN,
-			StreamName:   &d.config.StreamName,
-		})
-		if err != nil {
-			return count, err
+			count++
 		}
 
-		count++
+		return count, nil
 	}
 
-	return count, nil
-}
-
-func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int, error) {
-	// Kinesis put records requests have a size limit of 5 MB per request, 1 MB per record,
-	// and a count limit of 500 records per request, so generate the records requests first
 	var entries []types.PutRecordsRequestEntry
 	var reqs []*kinesis.PutRecordsInput
-	var mib1 int = 1024 * 1024
-	var mib5 int = 5 * mib1
-	sizeLimit := mib5
 
 	// create the put records request
 	for j := 0; j < len(records); j++ {
-		sizeLimit -= len(records[j].Bytes())
-
-		// size limit reached
-		if sizeLimit <= 0 {
-			reqs = append(reqs, &kinesis.PutRecordsInput{
-				StreamARN:  &d.config.StreamARN,
-				StreamName: &d.config.StreamName,
-				Records:    entries,
-			})
-
-			sizeLimit = mib5
-			entries = []types.PutRecordsRequestEntry{}
-
-			j--
-
-			continue
-		}
-
 		key := string(records[j].Key.Bytes())
 		recordEntry := types.PutRecordsRequestEntry{
 			Data:         records[j].Bytes(),
@@ -188,4 +151,9 @@ func (d *Destination) putRecords(ctx context.Context, records []sdk.Record) (int
 	}
 
 	return written, nil
+}
+
+func (d *Destination) Teardown(ctx context.Context) error {
+	// no shutdown required
+	return nil
 }
