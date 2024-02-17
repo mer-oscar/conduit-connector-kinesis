@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -21,6 +22,8 @@ type Source struct {
 	client *kinesis.Client
 
 	eventStreams []*kinesis.SubscribeToShardEventStream
+	caches       chan []sdk.Record
+	buffer       chan sdk.Record
 }
 
 type SourceConfig struct {
@@ -29,8 +32,10 @@ type SourceConfig struct {
 }
 
 func NewSource() sdk.Source {
-	// Create Source and wrap it in the default middleware.
-	return sdk.SourceWithMiddleware(&Source{}, sdk.DefaultSourceMiddleware()...)
+	return sdk.SourceWithMiddleware(&Source{
+		caches: make(chan []sdk.Record, 1),
+		buffer: make(chan sdk.Record, 1),
+	}, sdk.DefaultSourceMiddleware()...)
 }
 
 func (s *Source) Parameters() map[string]sdk.Parameter {
@@ -106,19 +111,50 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		return fmt.Errorf("error retrieving kinesis shards: %w", err)
 	}
 
+	var startingPosition types.StartingPosition
+	if pos == nil {
+		if s.config.StartFromLatest {
+			startingPosition.Type = types.ShardIteratorTypeLatest
+		} else {
+			startingPosition.Type = types.ShardIteratorTypeTrimHorizon
+		}
+	} else {
+		sequenceNumber := strings.Split(string(pos), "_")
+		startingPosition = types.StartingPosition{
+			Type:           types.ShardIteratorTypeAfterSequenceNumber,
+			SequenceNumber: &sequenceNumber[1],
+		}
+
+	}
+
 	// get iterators for shards
 	for _, shard := range listShardsResponse.Shards {
 		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
 			ConsumerARN: consumerResponse.Consumer.ConsumerARN,
 			ShardId:     shard.ShardId,
 			// read from the oldest untrimmed record
-			StartingPosition: &types.StartingPosition{Type: types.ShardIteratorTypeTrimHorizon},
+			StartingPosition: &startingPosition,
 		})
 		if err != nil {
 			return fmt.Errorf("error creating stream subscription: %w", err)
 		}
 
 		s.eventStreams = append(s.eventStreams, subscriptionResponse.GetStream())
+
+		for _, stream := range s.eventStreams {
+			if len(stream.Events()) == 0 {
+				continue
+			}
+
+			for event := range stream.Events() {
+				eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+
+				if len(eventValue.Records) > 0 {
+					records := toRecords(eventValue.Records)
+					s.caches <- records
+				}
+			}
+		}
 	}
 
 	return nil
@@ -151,22 +187,24 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 				break
 			}
 
-			eventRec := eventValue.Records[0]
-			position := *eventRec.PartitionKey + "_" + *eventRec.SequenceNumber
+			if len(eventValue.Records) > 0 {
+				eventRec := eventValue.Records[0]
+				position := *eventRec.PartitionKey + "_" + *eventRec.SequenceNumber
 
-			rec := sdk.Util.Source.NewRecordCreate(
-				sdk.Position(position),
-				sdk.Metadata{
-					"partitionKey": *eventRec.PartitionKey,
-				},
-				sdk.RawData(*eventRec.SequenceNumber),
-				sdk.RawData(eventRec.Data),
-			)
-			return rec, nil
+				rec := sdk.Util.Source.NewRecordCreate(
+					sdk.Position(position),
+					sdk.Metadata{
+						"partitionKey": *eventRec.PartitionKey,
+					},
+					sdk.RawData(*eventRec.SequenceNumber),
+					sdk.RawData(eventRec.Data),
+				)
+				return rec, nil
+			}
 		}
 	}
 
-	return sdk.Record{}, nil
+	return sdk.Record{}, sdk.ErrBackoffRetry
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
@@ -183,5 +221,30 @@ func (s *Source) Teardown(ctx context.Context) error {
 	// Teardown signals to the plugin that there will be no more calls to any
 	// other function. After Teardown returns, the plugin should be ready for a
 	// graceful shutdown.
+	for _, stream := range s.eventStreams {
+		stream.Close()
+	}
+
 	return nil
+}
+
+func toRecords(kinRecords []types.Record) []sdk.Record {
+	var sdkRecs []sdk.Record
+
+	for _, rec := range kinRecords {
+		position := *rec.PartitionKey + "_" + *rec.SequenceNumber
+
+		sdkRec := sdk.Util.Source.NewRecordCreate(
+			sdk.Position(position),
+			sdk.Metadata{
+				"partitionKey": *rec.PartitionKey,
+			},
+			sdk.RawData(*rec.SequenceNumber),
+			sdk.RawData(rec.Data),
+		)
+
+		sdkRecs = append(sdkRecs, sdkRec)
+	}
+
+	return sdkRecs
 }
