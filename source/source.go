@@ -3,7 +3,6 @@ package source
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -112,27 +111,17 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	}
 
 	var startingPosition types.StartingPosition
-	if pos == nil {
-		if s.config.StartFromLatest {
-			startingPosition.Type = types.ShardIteratorTypeLatest
-		} else {
-			startingPosition.Type = types.ShardIteratorTypeTrimHorizon
-		}
+	if s.config.StartFromLatest {
+		startingPosition.Type = types.ShardIteratorTypeLatest
 	} else {
-		sequenceNumber := strings.Split(string(pos), "_")
-		startingPosition = types.StartingPosition{
-			Type:           types.ShardIteratorTypeAfterSequenceNumber,
-			SequenceNumber: &sequenceNumber[1],
-		}
-
+		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
 	}
 
 	// get iterators for shards
 	for _, shard := range listShardsResponse.Shards {
 		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
-			ConsumerARN: consumerResponse.Consumer.ConsumerARN,
-			ShardId:     shard.ShardId,
-			// read from the oldest untrimmed record
+			ConsumerARN:      consumerResponse.Consumer.ConsumerARN,
+			ShardId:          shard.ShardId,
 			StartingPosition: &startingPosition,
 		})
 		if err != nil {
@@ -140,21 +129,15 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		}
 
 		s.eventStreams = append(s.eventStreams, subscriptionResponse.GetStream())
+	}
 
-		for _, stream := range s.eventStreams {
-			if len(stream.Events()) == 0 {
-				continue
-			}
-
-			for event := range stream.Events() {
-				eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
-
-				if len(eventValue.Records) > 0 {
-					records := toRecords(eventValue.Records)
-					s.caches <- records
-				}
-			}
+	for _, stream := range s.eventStreams {
+		if len(stream.Events()) == 0 {
+			continue
 		}
+
+		go watchStream(stream.Events(), s.caches)
+		go loadRecordsIntoBuffer(s.buffer, s.caches)
 	}
 
 	return nil
@@ -175,32 +158,13 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// After Read returns an error the function won't be called again (except if
 	// the error is ErrBackoffRetry, as mentioned above).
 	// Read can be called concurrently with Ack.
-	for _, stream := range s.eventStreams {
-		if len(stream.Events()) == 0 {
-			continue
-		}
 
-		for event := range stream.Events() {
-			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
-
-			if eventValue.MillisBehindLatest == aws.Int64(0) {
-				break
-			}
-
-			if len(eventValue.Records) > 0 {
-				eventRec := eventValue.Records[0]
-				position := *eventRec.PartitionKey + "_" + *eventRec.SequenceNumber
-
-				rec := sdk.Util.Source.NewRecordCreate(
-					sdk.Position(position),
-					sdk.Metadata{
-						"partitionKey": *eventRec.PartitionKey,
-					},
-					sdk.RawData(*eventRec.SequenceNumber),
-					sdk.RawData(eventRec.Data),
-				)
-				return rec, nil
-			}
+	if len(s.buffer) > 0 {
+		select {
+		case rec := <-s.buffer:
+			return rec, nil
+		case <-ctx.Done():
+			return sdk.Record{}, ctx.Err()
 		}
 	}
 
@@ -247,4 +211,21 @@ func toRecords(kinRecords []types.Record) []sdk.Record {
 	}
 
 	return sdkRecs
+}
+
+func loadRecordsIntoBuffer(buffer chan sdk.Record, caches chan []sdk.Record) {
+	cache := <-caches
+	for _, record := range cache {
+		buffer <- record
+	}
+}
+
+func watchStream(eventStream <-chan types.SubscribeToShardEventStream, caches chan []sdk.Record) {
+	event := <-eventStream
+
+	eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+	if *eventValue.MillisBehindLatest > *aws.Int64(0) {
+		records := toRecords(eventValue.Records)
+		caches <- records
+	}
 }
