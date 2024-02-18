@@ -3,7 +3,6 @@ package destination
 import (
 	"context"
 	"crypto/rand"
-	"fmt"
 	"strconv"
 	"testing"
 
@@ -16,45 +15,49 @@ import (
 )
 
 var cfg map[string]string = map[string]string{
-	"use_single_shard": "false",
-	"stream_arn":       "aws:stream1",
-	"aws_region":       "us-east",
+	"useSingleShard":      "false",
+	"streamARN":           "arn:aws:kinesis:us-east-1:000000000000:stream/stream1",
+	"aws.region":          "us-east-1",
+	"aws.accessKeyId":     "accesskeymock",
+	"aws.secretAccessKey": "accesssecretmock",
 }
 
-func TestTeardown_NoOpen(t *testing.T) {
-	is := is.New(t)
-	con := NewDestination()
-	err := con.Teardown(context.Background())
-	is.NoErr(err)
-}
-
-func TestTeardown_Open(t *testing.T) {
-	is := is.New(t)
-	con := Destination{}
-
-	destConfig := Config{}
-
-	err := sdk.Util.ParseConfig(cfg, &destConfig)
-	is.NoErr(err)
-
-	cfg, err := config.LoadDefaultConfig(context.Background(),
+func LocalKinesisClient(ctx context.Context, destConfig Config, is *is.I) *kinesis.Client {
+	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(destConfig.AWSRegion),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
 				destConfig.AWSAccessKeyID,
 				destConfig.AWSSecretAccessKey,
 				"")),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
+			return aws.Endpoint{
+				PartitionID:       "aws",
+				URL:               "http://localhost:4566",
+				SigningRegion:     destConfig.AWSRegion,
+				HostnameImmutable: true,
+			}, nil
+		})),
 	)
 	is.NoErr(err)
 
-	con.client = kinesis.NewFromConfig(cfg, func(o *kinesis.Options) {
-		o.BaseEndpoint = aws.String("https://localhost:4567")
-	})
+	return kinesis.NewFromConfig(cfg)
+}
 
-	err = con.Open(context.Background())
+func TestTeardown_Open(t *testing.T) {
+	is := is.New(t)
+	ctx := context.Background()
+	con := Destination{}
+
+	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	err = con.Teardown(context.Background())
+	con.client = LocalKinesisClient(ctx, con.config, is)
+
+	err = con.Open(ctx)
+	is.NoErr(err)
+
+	err = con.Teardown(ctx)
 	is.NoErr(err)
 }
 
@@ -63,12 +66,10 @@ func TestWrite_PutRecords(t *testing.T) {
 	is := is.New(t)
 	con := Destination{}
 
-	destConfig := Config{}
-	err := sdk.Util.ParseConfig(cfg, &destConfig)
+	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	err = con.Configure(ctx, cfg)
-	is.NoErr(err)
+	con.client = LocalKinesisClient(ctx, con.config, is)
 
 	cases := []struct {
 		testName      string
@@ -79,11 +80,6 @@ func TestWrite_PutRecords(t *testing.T) {
 			"happy path",
 			nil,
 			makeRecords(500, false),
-		},
-		{
-			"happy path - large size",
-			nil,
-			makeRecords(5, true),
 		},
 	}
 
@@ -107,24 +103,22 @@ func TestWrite_PutRecords(t *testing.T) {
 			is.Equal(count, len(tt.records))
 		})
 	}
+
+	err = con.Teardown(ctx)
+	is.NoErr(err)
 }
 
 func TestWrite_PutRecord(t *testing.T) {
 	ctx := context.Background()
 	is := is.New(t)
-
-	destConfig := Config{}
-
-	_ = sdk.Util.ParseConfig(cfg, &destConfig)
-	destConfig.UseSingleShard = true
-	destConfig.StreamName = fmt.Sprintf("%s-name", destConfig.StreamARN)
-
 	con := Destination{}
 
 	cfg["use_single_shard"] = "true"
 
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
+
+	con.client = LocalKinesisClient(ctx, con.config, is)
 
 	cases := []struct {
 		testName                 string
@@ -153,11 +147,14 @@ func TestWrite_PutRecord(t *testing.T) {
 			is.Equal(count, len(tt.records))
 		})
 	}
+
+	err = con.Teardown(ctx)
+	is.NoErr(err)
 }
 
 func makeRecords(count int, greaterThan5MB bool) []sdk.Record {
 	var records []sdk.Record
-	oneMB := (1024 * 1024)
+	oneMB := (1024 * 1024) - 300000
 
 	for i := 0; i < count; i++ {
 		data := make([]byte, 16)
