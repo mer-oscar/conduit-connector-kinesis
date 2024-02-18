@@ -7,13 +7,17 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/matryer/is"
 )
 
 var cfg map[string]string = map[string]string{
 	"use_single_shard": "false",
-	"stream_arn":       "aws:streamARNTest",
+	"stream_arn":       "aws:stream1",
 	"aws_region":       "us-east",
 }
 
@@ -32,6 +36,20 @@ func TestTeardown_Open(t *testing.T) {
 
 	err := sdk.Util.ParseConfig(cfg, &destConfig)
 	is.NoErr(err)
+
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion(destConfig.AWSRegion),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				destConfig.AWSAccessKeyID,
+				destConfig.AWSSecretAccessKey,
+				"")),
+	)
+	is.NoErr(err)
+
+	con.client = kinesis.NewFromConfig(cfg, func(o *kinesis.Options) {
+		o.BaseEndpoint = aws.String("https://localhost:4567")
+	})
 
 	err = con.Open(context.Background())
 	is.NoErr(err)

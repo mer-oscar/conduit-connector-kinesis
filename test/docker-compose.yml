@@ -3,3 +3,18 @@
 version: "3.9"
 
 services:
+  kinesis-mock:
+    image: ghcr.io/etspaceman/kinesis-mock:0.4.1
+    ports:
+      - "4567:4567"
+      - "4568:4568"
+    environment:
+      - "LOG_LEVEL=DEBUG"
+      - "INITIALIZE_STREAMS=stream1:3"
+      - "SHOULD_PERSIST_DATA=true"
+      - "PERSIST_PATH=/tmp/datadir1"
+    healthcheck:
+      test: "curl --fail http://localhost:4568/healthcheck || exit 1"
+      interval: 5s
+      timeout: 5s
+      retries: 20
