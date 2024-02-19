@@ -62,16 +62,8 @@ func (d *Destination) Configure(ctx context.Context, cfg map[string]string) erro
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	return nil
-}
-
-func (d *Destination) Open(ctx context.Context) error {
-	// Open is called after Configure to signal the plugin it can prepare to
-	// start writing records. If needed, the plugin should open connections in
-	// this function.
-
 	// Configure the creds for the client
-	cfg, err := config.LoadDefaultConfig(ctx,
+	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(d.config.AWSRegion),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
@@ -83,10 +75,18 @@ func (d *Destination) Open(ctx context.Context) error {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
 
-	d.client = kinesis.NewFromConfig(cfg)
+	d.client = kinesis.NewFromConfig(awsCfg)
+
+	return nil
+}
+
+func (d *Destination) Open(ctx context.Context) error {
+	// Open is called after Configure to signal the plugin it can prepare to
+	// start writing records. If needed, the plugin should open connections in
+	// this function.
 
 	// DescribeStream to know that the stream ARN is valid and usable, ie test connection
-	_, err = d.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+	_, err := d.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamARN: &d.config.StreamARN,
 	})
 	if err != nil {
@@ -106,7 +106,6 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 				PartitionKey: &partition,
 				Data:         record.Bytes(),
 				StreamARN:    &d.config.StreamARN,
-				StreamName:   &d.config.StreamName,
 			})
 			if err != nil {
 				return count, err
@@ -119,7 +118,7 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 	}
 
 	var entries []types.PutRecordsRequestEntry
-	var reqs []*kinesis.PutRecordsInput
+	var req *kinesis.PutRecordsInput
 
 	// create the put records request
 	for j := 0; j < len(records); j++ {
@@ -131,23 +130,24 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 		entries = append(entries, recordEntry)
 	}
 
-	reqs = append(reqs, &kinesis.PutRecordsInput{
+	req = &kinesis.PutRecordsInput{
 		StreamARN:  &d.config.StreamARN,
 		StreamName: &d.config.StreamName,
 		Records:    entries,
-	})
+	}
 
 	var written int
+	output, err := d.client.PutRecords(ctx, req)
+	if err != nil {
+		return written, err
+	}
 
-	// iterate through the PutRecords response and sum the successful record writes
-	// over the entire batch of requests
-	for _, req := range reqs {
-		output, err := d.client.PutRecords(ctx, req)
-		if err != nil {
-			written += len(output.Records) - int(*output.FailedRecordCount)
-			return written, err
+	for _, rec := range output.Records {
+		if rec.ErrorCode != nil {
+			sdk.Logger(ctx).Error().Msg("error when attempting to insert record: " + *rec.ErrorCode + " " + *rec.ErrorMessage)
+			continue
 		}
-		written += len(output.Records)
+		written++
 	}
 
 	return written, nil

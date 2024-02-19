@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -15,24 +16,24 @@ import (
 type Source struct {
 	sdk.UnimplementedSource
 
-	config SourceConfig
+	config Config
 
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
 
 	eventStreams []*kinesis.SubscribeToShardEventStream
-	caches       chan []sdk.Record
+	shards       []Shard
 	buffer       chan sdk.Record
+	consumerARN  string
 }
 
-type SourceConfig struct {
-	// Config includes parameters that are the same in the source and destination.
-	Config
+type Shard struct {
+	ShardID     *string
+	EventStream *kinesis.SubscribeToShardEventStream
 }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		caches: make(chan []sdk.Record, 1),
 		buffer: make(chan sdk.Record, 1),
 	}, sdk.DefaultSourceMiddleware()...)
 }
@@ -58,19 +59,9 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
-	return nil
-}
-
-func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
-	// Open is called after Configure to signal the plugin it can prepare to
-	// start producing records. If needed, the plugin should open connections in
-	// this function. The position parameter will contain the position of the
-	// last record that was successfully processed, Source should therefore
-	// start producing records after this position. The context passed to Open
-	// will be cancelled once the plugin receives a stop signal from Conduit.
 
 	// Configure the creds for the client
-	cfg, err := config.LoadDefaultConfig(ctx,
+	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(s.config.AWSRegion),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
@@ -82,10 +73,21 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
 
-	s.client = kinesis.NewFromConfig(cfg)
+	s.client = kinesis.NewFromConfig(awsCfg)
+
+	return nil
+}
+
+func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
+	// Open is called after Configure to signal the plugin it can prepare to
+	// start producing records. If needed, the plugin should open connections in
+	// this function. The position parameter will contain the position of the
+	// last record that was successfully processed, Source should therefore
+	// start producing records after this position. The context passed to Open
+	// will be cancelled once the plugin receives a stop signal from Conduit.
 
 	// DescribeStream to know that the stream ARN is valid and usable, ie test connection
-	_, err = s.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+	_, err := s.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamARN: &s.config.StreamARN,
 	})
 	if err != nil {
@@ -96,11 +98,13 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	// register consumer
 	consumerResponse, err := s.client.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
 		StreamARN:    &s.config.StreamARN,
-		ConsumerName: aws.String("conduit-connector-source"),
+		ConsumerName: aws.String("conduit-connector-kinesis-source"),
 	})
 	if err != nil {
 		return fmt.Errorf("error registering consumer: %w", err)
 	}
+
+	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
 
 	// get shards
 	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
@@ -128,16 +132,12 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 			return fmt.Errorf("error creating stream subscription: %w", err)
 		}
 
-		s.eventStreams = append(s.eventStreams, subscriptionResponse.GetStream())
-	}
-
-	for _, stream := range s.eventStreams {
-		if len(stream.Events()) == 0 {
-			continue
+		shard := Shard{
+			EventStream: subscriptionResponse.GetStream(),
+			ShardID:     shard.ShardId,
 		}
 
-		go watchStream(stream.Events(), s.caches)
-		go loadRecordsIntoBuffer(s.buffer, s.caches)
+		s.shards = append(s.shards, shard)
 	}
 
 	return nil
@@ -159,16 +159,33 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// the error is ErrBackoffRetry, as mentioned above).
 	// Read can be called concurrently with Ack.
 
-	if len(s.buffer) > 0 {
-		select {
-		case rec := <-s.buffer:
-			return rec, nil
-		case <-ctx.Done():
-			return sdk.Record{}, ctx.Err()
-		}
+	// refresh the event streams everytime we call read, ie after backoff or initial load
+	for _, shard := range s.shards {
+		go func(shard Shard) {
+			event := <-shard.EventStream.Events()
+			if event == nil {
+				return
+			}
+
+			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+
+			if len(eventValue.Records) > 0 {
+				recs := toRecords(eventValue.Records, shard.ShardID)
+
+				for _, record := range recs {
+					s.buffer <- record
+				}
+			}
+		}(shard)
 	}
 
-	return sdk.Record{}, sdk.ErrBackoffRetry
+	select {
+	case rec := <-s.buffer:
+		return rec, nil
+	case <-time.After(time.Second * 5):
+		// 10 second timeout if theres no record in the buffer
+		return sdk.Record{}, sdk.ErrBackoffRetry
+	}
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
@@ -189,21 +206,30 @@ func (s *Source) Teardown(ctx context.Context) error {
 		stream.Close()
 	}
 
+	_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
+		ConsumerARN: &s.consumerARN,
+	})
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func toRecords(kinRecords []types.Record) []sdk.Record {
+func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 	var sdkRecs []sdk.Record
 
 	for _, rec := range kinRecords {
-		position := *rec.PartitionKey + "_" + *rec.SequenceNumber
+		// composite key of partition key and sequence number
+		position := *shardID + "_" + *rec.SequenceNumber
 
 		sdkRec := sdk.Util.Source.NewRecordCreate(
 			sdk.Position(position),
 			sdk.Metadata{
-				"partitionKey": *rec.PartitionKey,
+				"shardId":        *shardID,
+				"sequenceNumber": *rec.SequenceNumber,
 			},
-			sdk.RawData(*rec.SequenceNumber),
+			sdk.RawData(position),
 			sdk.RawData(rec.Data),
 		)
 
@@ -211,21 +237,4 @@ func toRecords(kinRecords []types.Record) []sdk.Record {
 	}
 
 	return sdkRecs
-}
-
-func loadRecordsIntoBuffer(buffer chan sdk.Record, caches chan []sdk.Record) {
-	cache := <-caches
-	for _, record := range cache {
-		buffer <- record
-	}
-}
-
-func watchStream(eventStream <-chan types.SubscribeToShardEventStream, caches chan []sdk.Record) {
-	event := <-eventStream
-
-	eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
-	if *eventValue.MillisBehindLatest > *aws.Int64(0) {
-		records := toRecords(eventValue.Records)
-		caches <- records
-	}
 }

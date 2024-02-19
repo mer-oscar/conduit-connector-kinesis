@@ -12,5 +12,5 @@ type Config struct {
 	// or to add records to a single shard using KinesisClient.PutRecord
 	// (preserves ordering, records written to a single shard)
 	// Defaults to false to take advantage of batching performance
-	UseSingleShard bool `json:"use_single_shard" validate:"required" default:"true"`
+	UseSingleShard bool `json:"useSingleShard" validate:"required" default:"true"`
 }
