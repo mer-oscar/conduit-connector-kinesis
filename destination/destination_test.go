@@ -158,11 +158,11 @@ func makeRecords(count int, greaterThan5MB bool) []sdk.Record {
 
 	for i := 0; i < count; i++ {
 		data := make([]byte, 16)
-		rand.Read(data)
+		_, _ = rand.Read(data)
 
 		if greaterThan5MB {
 			data = make([]byte, oneMB)
-			rand.Read(data)
+			_, _ = rand.Read(data)
 		}
 		key := strconv.Itoa(i)
 		rec := sdk.Util.Source.NewRecordCreate(
