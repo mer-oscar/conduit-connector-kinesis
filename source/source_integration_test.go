@@ -67,7 +67,6 @@ func TestRead(t *testing.T) {
 	ctx := context.Background()
 	con := Source{
 		buffer: make(chan sdk.Record, 1),
-		ticker: *time.NewTicker(time.Second * 10),
 	}
 
 	err := con.Configure(ctx, cfg)
@@ -106,8 +105,6 @@ func TestRead(t *testing.T) {
 		recs = append(recs, getRecs.Records...)
 	}
 
-	fmt.Println(recs)
-
 	length := len(recs)
 	fmt.Println(length, "read records using getRecords")
 
@@ -115,28 +112,52 @@ func TestRead(t *testing.T) {
 	is.NoErr(err)
 
 	for i := 0; i < 5; i++ {
-		rec, err := con.Read(ctx)
+		_, err := con.Read(ctx)
 		is.NoErr(err)
-
-		fmt.Println(rec)
 	}
 
 	_, err = con.Read(ctx)
 	is.Equal(err, sdk.ErrBackoffRetry)
 
+	seqNumber := make(chan string, 1)
+
 	// send a new message
-	putRecResp, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
-		StreamARN:    &con.config.StreamARN,
-		Data:         []byte("some data here"),
-		PartitionKey: aws.String("5"),
-	})
-	is.NoErr(err)
+	go func() {
+		putRecResp, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
+			StreamARN:    &con.config.StreamARN,
+			Data:         []byte("some data here"),
+			PartitionKey: aws.String("5"),
+		})
+		is.NoErr(err)
+
+		seqNumber <- *putRecResp.SequenceNumber
+	}()
+
+	// receive value so we know theres one in the buffer before calling read
+	sequenceNumber := <-seqNumber
 
 	rec, err := con.Read(ctx)
 	is.NoErr(err)
 
-	fmt.Println(rec)
-	is.Equal(*putRecResp.SequenceNumber, rec.Metadata["sequenceNumber"])
+	is.Equal(sequenceNumber, rec.Metadata["sequenceNumber"])
+
+	// send value and then block read until it comes in
+	go func() {
+		_, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
+			StreamARN:    &con.config.StreamARN,
+			Data:         []byte("some data here again"),
+			PartitionKey: aws.String("6"),
+		})
+		is.NoErr(err)
+	}()
+
+	// expect message to be read from subscription before timeout
+	_, err = con.Read(ctx)
+	is.NoErr(err)
+
+	// full 5 second timeout
+	_, err = con.Read(ctx)
+	is.Equal(err, sdk.ErrBackoffRetry)
 }
 
 func setupSourceTest(ctx context.Context, client *kinesis.Client, is *is.I) string {

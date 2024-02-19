@@ -21,16 +21,20 @@ type Source struct {
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
 
-	ticker       time.Ticker
 	eventStreams []*kinesis.SubscribeToShardEventStream
+	shards       []Shard
 	buffer       chan sdk.Record
 	consumerARN  string
+}
+
+type Shard struct {
+	ShardID     *string
+	EventStream *kinesis.SubscribeToShardEventStream
 }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
 		buffer: make(chan sdk.Record, 1),
-		ticker: *time.NewTicker(time.Second * 10),
 	}, sdk.DefaultSourceMiddleware()...)
 }
 
@@ -128,7 +132,12 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 			return fmt.Errorf("error creating stream subscription: %w", err)
 		}
 
-		s.eventStreams = append(s.eventStreams, subscriptionResponse.GetStream())
+		shard := Shard{
+			EventStream: subscriptionResponse.GetStream(),
+			ShardID:     shard.ShardId,
+		}
+
+		s.shards = append(s.shards, shard)
 	}
 
 	return nil
@@ -151,42 +160,32 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// Read can be called concurrently with Ack.
 
 	// refresh the event streams everytime we call read, ie after backoff or initial load
-	for _, stream := range s.eventStreams {
-		go func(stream *kinesis.SubscribeToShardEventStream) {
-			event := <-stream.Events()
+	for _, shard := range s.shards {
+		go func(shard Shard) {
+			event := <-shard.EventStream.Events()
 			if event == nil {
 				return
 			}
 
 			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
 
-			fmt.Println(len(eventValue.Records), *eventValue.ContinuationSequenceNumber)
 			if len(eventValue.Records) > 0 {
-				recs := toRecords(eventValue.Records)
+				recs := toRecords(eventValue.Records, shard.ShardID)
 
 				for _, record := range recs {
 					s.buffer <- record
 				}
 			}
-		}(stream)
+		}(shard)
 	}
-
-	var count int
 
 	select {
 	case rec := <-s.buffer:
-		count = 0
 		return rec, nil
-	case <-s.ticker.C:
-		count++
-
-		// block for ten ticks, return error
-		if count == 10 {
-			return sdk.Record{}, sdk.ErrBackoffRetry
-		}
+	case <-time.After(time.Second * 5):
+		// 10 second timeout if theres no record in the buffer
+		return sdk.Record{}, sdk.ErrBackoffRetry
 	}
-
-	return sdk.Record{}, sdk.ErrBackoffRetry
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
@@ -217,17 +216,17 @@ func (s *Source) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func toRecords(kinRecords []types.Record) []sdk.Record {
+func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 	var sdkRecs []sdk.Record
 
 	for _, rec := range kinRecords {
 		// composite key of partition key and sequence number
-		position := *rec.PartitionKey + "_" + *rec.SequenceNumber
+		position := *shardID + "_" + *rec.SequenceNumber
 
 		sdkRec := sdk.Util.Source.NewRecordCreate(
 			sdk.Position(position),
 			sdk.Metadata{
-				"partitionKey":   *rec.PartitionKey,
+				"shardId":        *shardID,
 				"sequenceNumber": *rec.SequenceNumber,
 			},
 			sdk.RawData(position),
