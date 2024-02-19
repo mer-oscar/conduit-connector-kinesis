@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -195,6 +196,12 @@ func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
 	// outstanding acks that need to be delivered. When Teardown is called it is
 	// guaranteed there won't be any more calls to Ack.
 	// Ack can be called concurrently with Read.
+	positionSplit := strings.Split(string(position), "_")
+
+	shardID := positionSplit[0]
+	seqNumber := positionSplit[1]
+
+	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("ack'd record with shardID: %s and sequence number: %s", shardID, seqNumber))
 	return nil
 }
 
@@ -206,11 +213,13 @@ func (s *Source) Teardown(ctx context.Context) error {
 		stream.Close()
 	}
 
-	_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
-		ConsumerARN: &s.consumerARN,
-	})
-	if err != nil {
-		return err
+	if s.consumerARN != "" {
+		_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
+			ConsumerARN: &s.consumerARN,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

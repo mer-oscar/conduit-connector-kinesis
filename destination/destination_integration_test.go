@@ -3,13 +3,17 @@ package destination
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/matryer/is"
 )
@@ -20,6 +24,44 @@ var cfg map[string]string = map[string]string{
 	"aws.region":          "us-east-1",
 	"aws.accessKeyId":     "accesskeymock",
 	"aws.secretAccessKey": "accesssecretmock",
+}
+
+func setupDestinationTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
+	streamName := "stream-destination"
+	// create stream
+	_, err := client.CreateStream(ctx, &kinesis.CreateStreamInput{
+		StreamName: &streamName,
+	})
+	if err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			fmt.Println("stream already exists")
+		}
+	} else {
+		is.NoErr(err)
+	}
+
+	time.Sleep(time.Second * 5)
+	describe, err := client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
+		StreamName: &streamName,
+	})
+	if err != nil {
+		// try to set up the stream again
+		return setupDestinationTest(ctx, client, is)
+	}
+	is.NoErr(err)
+
+	return *describe.StreamDescription.StreamARN
+}
+
+func cleanupTest(ctx context.Context, client *kinesis.Client, streamARN string) {
+	_, err := client.DeleteStream(ctx, &kinesis.DeleteStreamInput{
+		EnforceConsumerDeletion: aws.Bool(true),
+		StreamARN:               &streamARN,
+	})
+
+	if err != nil {
+		fmt.Println("failed to delete stream")
+	}
 }
 
 func LocalKinesisClient(ctx context.Context, destConfig Config, is *is.I) *kinesis.Client {
@@ -53,6 +95,8 @@ func TestTeardown_Open(t *testing.T) {
 	is.NoErr(err)
 
 	con.client = LocalKinesisClient(ctx, con.config, is)
+	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
+	defer cleanupTest(ctx, con.client, con.config.StreamARN)
 
 	err = con.Open(ctx)
 	is.NoErr(err)
@@ -70,6 +114,7 @@ func TestWrite_PutRecords(t *testing.T) {
 	is.NoErr(err)
 
 	con.client = LocalKinesisClient(ctx, con.config, is)
+	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
 
 	cases := []struct {
 		testName      string
@@ -101,8 +146,35 @@ func TestWrite_PutRecords(t *testing.T) {
 
 			is.NoErr(err)
 			is.Equal(count, len(tt.records))
+
+			listShards, err := con.client.ListShards(ctx, &kinesis.ListShardsInput{
+				StreamARN: &con.config.StreamARN,
+			})
+			is.NoErr(err)
+
+			var recs []types.Record
+			for _, shard := range listShards.Shards {
+				si, err := con.client.GetShardIterator(ctx, &kinesis.GetShardIteratorInput{
+					ShardId:           shard.ShardId,
+					ShardIteratorType: types.ShardIteratorTypeTrimHorizon,
+					StreamARN:         &con.config.StreamARN,
+				})
+				is.NoErr(err)
+
+				getRecs, err := con.client.GetRecords(ctx, &kinesis.GetRecordsInput{
+					StreamARN:     &con.config.StreamARN,
+					ShardIterator: si.ShardIterator,
+				})
+				is.NoErr(err)
+
+				recs = append(recs, getRecs.Records...)
+			}
+
+			is.Equal(count, len(recs))
 		})
 	}
+
+	cleanupTest(ctx, con.client, con.config.StreamARN)
 
 	err = con.Teardown(ctx)
 	is.NoErr(err)
@@ -119,6 +191,7 @@ func TestWrite_PutRecord(t *testing.T) {
 	is.NoErr(err)
 
 	con.client = LocalKinesisClient(ctx, con.config, is)
+	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
 
 	cases := []struct {
 		testName                 string
@@ -145,8 +218,35 @@ func TestWrite_PutRecord(t *testing.T) {
 
 			is.NoErr(err)
 			is.Equal(count, len(tt.records))
+
+			listShards, err := con.client.ListShards(ctx, &kinesis.ListShardsInput{
+				StreamARN: &con.config.StreamARN,
+			})
+			is.NoErr(err)
+
+			var recs []types.Record
+			for _, shard := range listShards.Shards {
+				si, err := con.client.GetShardIterator(ctx, &kinesis.GetShardIteratorInput{
+					ShardId:           shard.ShardId,
+					ShardIteratorType: types.ShardIteratorTypeTrimHorizon,
+					StreamARN:         &con.config.StreamARN,
+				})
+				is.NoErr(err)
+
+				getRecs, err := con.client.GetRecords(ctx, &kinesis.GetRecordsInput{
+					StreamARN:     &con.config.StreamARN,
+					ShardIterator: si.ShardIterator,
+				})
+				is.NoErr(err)
+
+				recs = append(recs, getRecs.Records...)
+			}
+
+			is.Equal(count, len(recs))
 		})
 	}
+
+	cleanupTest(ctx, con.client, con.config.StreamARN)
 
 	err = con.Teardown(ctx)
 	is.NoErr(err)

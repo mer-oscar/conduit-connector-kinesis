@@ -12,9 +12,4 @@ services:
       - DEBUG=1
       - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
-      - "${PWD}/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh"  # ready hook
-      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
-networks:
-  default:
-    name: "localstack"

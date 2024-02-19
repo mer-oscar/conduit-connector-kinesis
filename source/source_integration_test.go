@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,9 +55,14 @@ func TestTeardown_Open(t *testing.T) {
 	is.NoErr(err)
 
 	con.client = LocalKinesisClient(ctx, con.config, is)
+	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	err = con.Open(ctx, nil)
 	is.NoErr(err)
+
+	// cleanupTest deletes the stream
+	cleanupTest(ctx, con.client, con.config.StreamARN)
+	con.consumerARN = ""
 
 	err = con.Teardown(ctx)
 	is.NoErr(err)
@@ -76,10 +82,11 @@ func TestRead(t *testing.T) {
 	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	defer func() {
+		cleanupTest(ctx, con.client, con.config.StreamARN)
+		con.consumerARN = ""
+
 		err := con.Teardown(ctx)
 		is.NoErr(err)
-
-		cleanupTest(ctx, con.client, con.config.StreamARN)
 	}()
 
 	listShards, err := con.client.ListShards(ctx, &kinesis.ListShardsInput{
@@ -166,13 +173,22 @@ func setupSourceTest(ctx context.Context, client *kinesis.Client, is *is.I) stri
 	_, err := client.CreateStream(ctx, &kinesis.CreateStreamInput{
 		StreamName: &streamName,
 	})
-	is.NoErr(err)
+	if err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			fmt.Println("stream already exists")
+		}
+	} else {
+		is.NoErr(err)
+	}
 
 	time.Sleep(time.Second * 5)
 	describe, err := client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
 	})
-
+	if err != nil {
+		// try to set up the stream again
+		return setupSourceTest(ctx, client, is)
+	}
 	is.NoErr(err)
 
 	var recs []types.PutRecordsRequestEntry
