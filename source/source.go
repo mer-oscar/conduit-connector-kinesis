@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -20,16 +21,16 @@ type Source struct {
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
 
+	ticker       time.Ticker
 	eventStreams []*kinesis.SubscribeToShardEventStream
-	caches       chan []sdk.Record
 	buffer       chan sdk.Record
 	consumerARN  string
 }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		caches: make(chan []sdk.Record, 1),
 		buffer: make(chan sdk.Record, 1),
+		ticker: *time.NewTicker(time.Second * 10),
 	}, sdk.DefaultSourceMiddleware()...)
 }
 
@@ -148,6 +149,8 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// After Read returns an error the function won't be called again (except if
 	// the error is ErrBackoffRetry, as mentioned above).
 	// Read can be called concurrently with Ack.
+
+	// refresh the event streams everytime we call read, ie after backoff or initial load
 	for _, stream := range s.eventStreams {
 		go func(stream *kinesis.SubscribeToShardEventStream) {
 			event := <-stream.Events()
@@ -161,17 +164,27 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 			if len(eventValue.Records) > 0 {
 				recs := toRecords(eventValue.Records)
 
-				//s.caches <- recs
-
 				for _, record := range recs {
-					fmt.Println("record:", record)
 					s.buffer <- record
 				}
 			}
 		}(stream)
 	}
 
-	fmt.Println("got cache")
+	var count int
+
+	select {
+	case rec := <-s.buffer:
+		count = 0
+		return rec, nil
+	case <-s.ticker.C:
+		count++
+
+		// block for ten ticks, return error
+		if count == 10 {
+			return sdk.Record{}, sdk.ErrBackoffRetry
+		}
+	}
 
 	return sdk.Record{}, sdk.ErrBackoffRetry
 }
@@ -225,26 +238,4 @@ func toRecords(kinRecords []types.Record) []sdk.Record {
 	}
 
 	return sdkRecs
-}
-
-// func loadRecordsIntoBuffer(buffer chan sdk.Record, caches chan []sdk.Record) chan sdk.Record {
-// 	cache := <-caches
-// 	for _, record := range cache {
-// 		buffer <- record
-// 	}
-
-// 	return buffer
-// }
-
-func watchStream(eventStream <-chan types.SubscribeToShardEventStream, caches chan []sdk.Record) chan []sdk.Record {
-	event := <-eventStream
-
-	eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
-	if *eventValue.MillisBehindLatest > *aws.Int64(0) {
-		records := toRecords(eventValue.Records)
-		caches <- records
-		return caches
-	}
-
-	return caches
 }

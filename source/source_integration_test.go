@@ -65,7 +65,10 @@ func TestTeardown_Open(t *testing.T) {
 func TestRead(t *testing.T) {
 	is := is.New(t)
 	ctx := context.Background()
-	con := Source{}
+	con := Source{
+		buffer: make(chan sdk.Record, 1),
+		ticker: *time.NewTicker(time.Second * 10),
+	}
 
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
@@ -103,27 +106,37 @@ func TestRead(t *testing.T) {
 		recs = append(recs, getRecs.Records...)
 	}
 
+	fmt.Println(recs)
+
 	length := len(recs)
 	fmt.Println(length, "read records using getRecords")
 
 	err = con.Open(ctx, nil)
 	is.NoErr(err)
 
-	for i := 0; i < length; i++ {
-		fmt.Println("called read")
+	for i := 0; i < 5; i++ {
 		rec, err := con.Read(ctx)
 		is.NoErr(err)
 
-		fmt.Println(rec.Position)
+		fmt.Println(rec)
 	}
 
 	_, err = con.Read(ctx)
 	is.Equal(err, sdk.ErrBackoffRetry)
 
 	// send a new message
+	putRecResp, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
+		StreamARN:    &con.config.StreamARN,
+		Data:         []byte("some data here"),
+		PartitionKey: aws.String("5"),
+	})
+	is.NoErr(err)
 
-	// read it
-	// fmt.Println(rec)
+	rec, err := con.Read(ctx)
+	is.NoErr(err)
+
+	fmt.Println(rec)
+	is.Equal(*putRecResp.SequenceNumber, rec.Metadata["sequenceNumber"])
 }
 
 func setupSourceTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
