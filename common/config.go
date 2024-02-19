@@ -14,4 +14,7 @@ type Config struct {
 	StreamARN string `json:"streamARN" validate:"required"`
 	// StreamName is the name of the Kinesis Data Stream
 	StreamName string `json:"streamName"`
+
+	// URL for endpoint override - testing/dry-run only
+	AWSURL string `json:"aws.url"`
 }

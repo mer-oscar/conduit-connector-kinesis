@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
@@ -22,28 +20,7 @@ var cfg map[string]string = map[string]string{
 	"aws.region":          "us-east-1",
 	"aws.accessKeyId":     "accesskeymock",
 	"aws.secretAccessKey": "accesssecretmock",
-}
-
-func LocalKinesisClient(ctx context.Context, srcConfig Config, is *is.I) *kinesis.Client {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(srcConfig.AWSRegion),
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(
-				srcConfig.AWSAccessKeyID,
-				srcConfig.AWSSecretAccessKey,
-				"")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
-			return aws.Endpoint{
-				PartitionID:       "aws",
-				URL:               "http://localhost:4566",
-				SigningRegion:     srcConfig.AWSRegion,
-				HostnameImmutable: true,
-			}, nil
-		})),
-	)
-	is.NoErr(err)
-
-	return kinesis.NewFromConfig(cfg)
+	"aws.url":             "http://localhost:4566",
 }
 
 func TestTeardown_Open(t *testing.T) {
@@ -54,7 +31,6 @@ func TestTeardown_Open(t *testing.T) {
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	con.client = LocalKinesisClient(ctx, con.config, is)
 	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	err = con.Open(ctx, nil)
@@ -78,7 +54,6 @@ func TestRead(t *testing.T) {
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	con.client = LocalKinesisClient(ctx, con.config, is)
 	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	defer func() {

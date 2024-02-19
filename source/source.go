@@ -62,18 +62,32 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 	}
 
 	// Configure the creds for the client
+	var cfgOptions []func(*config.LoadOptions) error
+	cfgOptions = append(cfgOptions, config.WithRegion(s.config.AWSRegion))
+	cfgOptions = append(cfgOptions, config.WithCredentialsProvider(
+		credentials.NewStaticCredentialsProvider(
+			s.config.AWSAccessKeyID,
+			s.config.AWSSecretAccessKey,
+			"")))
+
+	if s.config.AWSURL != "" {
+		cfgOptions = append(cfgOptions, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
+			return aws.Endpoint{
+				PartitionID:       "aws",
+				URL:               s.config.AWSURL,
+				SigningRegion:     s.config.AWSRegion,
+				HostnameImmutable: true,
+			}, nil
+		},
+		)))
+	}
+
 	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(s.config.AWSRegion),
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(
-				s.config.AWSAccessKeyID,
-				s.config.AWSSecretAccessKey,
-				"")),
+		cfgOptions...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
-
 	s.client = kinesis.NewFromConfig(awsCfg)
 
 	return nil

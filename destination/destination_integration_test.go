@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
@@ -24,6 +22,7 @@ var cfg map[string]string = map[string]string{
 	"aws.region":          "us-east-1",
 	"aws.accessKeyId":     "accesskeymock",
 	"aws.secretAccessKey": "accesssecretmock",
+	"aws.url":             "http://localhost:4566",
 }
 
 func setupDestinationTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
@@ -64,28 +63,6 @@ func cleanupTest(ctx context.Context, client *kinesis.Client, streamARN string) 
 	}
 }
 
-func LocalKinesisClient(ctx context.Context, destConfig Config, is *is.I) *kinesis.Client {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(destConfig.AWSRegion),
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(
-				destConfig.AWSAccessKeyID,
-				destConfig.AWSSecretAccessKey,
-				"")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
-			return aws.Endpoint{
-				PartitionID:       "aws",
-				URL:               "http://localhost:4566",
-				SigningRegion:     destConfig.AWSRegion,
-				HostnameImmutable: true,
-			}, nil
-		})),
-	)
-	is.NoErr(err)
-
-	return kinesis.NewFromConfig(cfg)
-}
-
 func TestTeardown_Open(t *testing.T) {
 	is := is.New(t)
 	ctx := context.Background()
@@ -94,7 +71,6 @@ func TestTeardown_Open(t *testing.T) {
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	con.client = LocalKinesisClient(ctx, con.config, is)
 	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
 	defer cleanupTest(ctx, con.client, con.config.StreamARN)
 
@@ -113,7 +89,6 @@ func TestWrite_PutRecords(t *testing.T) {
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	con.client = LocalKinesisClient(ctx, con.config, is)
 	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
 
 	cases := []struct {
@@ -190,7 +165,6 @@ func TestWrite_PutRecord(t *testing.T) {
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
 
-	con.client = LocalKinesisClient(ctx, con.config, is)
 	con.config.StreamARN = setupDestinationTest(ctx, con.client, is)
 
 	cases := []struct {

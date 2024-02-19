@@ -12,9 +12,9 @@ var version = "(devel)"
 func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:        "kinesis",
-		Summary:     "<describe your connector>",
-		Description: "<describe your connector in detail>",
+		Summary:     "A Conduit Connector for AWS Kinesis Data Streaming",
+		Description: "",
 		Version:     version,
-		Author:      "<your name>",
+		Author:      "Oscar Villavicencio",
 	}
 }

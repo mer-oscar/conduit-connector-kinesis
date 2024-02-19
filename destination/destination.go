@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -63,13 +64,28 @@ func (d *Destination) Configure(ctx context.Context, cfg map[string]string) erro
 	}
 
 	// Configure the creds for the client
+	var cfgOptions []func(*config.LoadOptions) error
+	cfgOptions = append(cfgOptions, config.WithRegion(d.config.AWSRegion))
+	cfgOptions = append(cfgOptions, config.WithCredentialsProvider(
+		credentials.NewStaticCredentialsProvider(
+			d.config.AWSAccessKeyID,
+			d.config.AWSSecretAccessKey,
+			"")))
+
+	if d.config.AWSURL != "" {
+		cfgOptions = append(cfgOptions, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
+			return aws.Endpoint{
+				PartitionID:       "aws",
+				URL:               d.config.AWSURL,
+				SigningRegion:     d.config.AWSRegion,
+				HostnameImmutable: true,
+			}, nil
+		},
+		)))
+	}
+
 	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(d.config.AWSRegion),
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(
-				d.config.AWSAccessKeyID,
-				d.config.AWSSecretAccessKey,
-				"")),
+		cfgOptions...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
