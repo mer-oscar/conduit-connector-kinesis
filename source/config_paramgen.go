@@ -33,17 +33,29 @@ func (Config) Parameters() map[string]sdk.Parameter {
 				sdk.ValidationRequired{},
 			},
 		},
-		"stream_arn": {
+		"aws.url": {
 			Default:     "",
-			Description: "stream_arn is the Kinesis stream's Amazon Resource Name",
+			Description: "URL for endpoint override - testing/dry-run only",
+			Type:        sdk.ParameterTypeString,
+			Validations: []sdk.Validation{},
+		},
+		"startFromLatest": {
+			Default:     "",
+			Description: "startFromLatest defaults to false. When true, sets the iterator type to LATEST (iterates from the point that the connection begins). when false, sets the iterator type to TRIM_HORIZON (iterates from the oldest record in the shard).",
+			Type:        sdk.ParameterTypeBool,
+			Validations: []sdk.Validation{},
+		},
+		"streamARN": {
+			Default:     "",
+			Description: "streamARN is the Kinesis stream's Amazon Resource Name",
 			Type:        sdk.ParameterTypeString,
 			Validations: []sdk.Validation{
 				sdk.ValidationRequired{},
 			},
 		},
-		"stream_name": {
+		"streamName": {
 			Default:     "",
-			Description: "stream_name is the name of the Kinesis Data Stream",
+			Description: "streamName is the name of the Kinesis Data Stream",
 			Type:        sdk.ParameterTypeString,
 			Validations: []sdk.Validation{},
 		},

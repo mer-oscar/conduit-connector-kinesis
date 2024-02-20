@@ -13,7 +13,7 @@ func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:        "kinesis",
 		Summary:     "A Conduit Connector for AWS Kinesis Data Streaming",
-		Description: "",
+		Description: "A source and destination connector for AWS Kinesis Data Streaming",
 		Version:     version,
 		Author:      "Oscar Villavicencio",
 	}

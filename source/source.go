@@ -22,10 +22,9 @@ type Source struct {
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
 
-	eventStreams []*kinesis.SubscribeToShardEventStream
-	shards       []Shard
-	buffer       chan sdk.Record
-	consumerARN  string
+	shards      []Shard
+	buffer      chan sdk.Record
+	consumerARN string
 }
 
 type Shard struct {
@@ -93,7 +92,7 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 	return nil
 }
 
-func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
+func (s *Source) Open(ctx context.Context, _ sdk.Position) error {
 	// Open is called after Configure to signal the plugin it can prepare to
 	// start producing records. If needed, the plugin should open connections in
 	// this function. The position parameter will contain the position of the
@@ -121,86 +120,14 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 
 	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
 
-	// get shards
-	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
-		StreamARN: &s.config.StreamARN,
-	})
-	if err != nil {
-		return fmt.Errorf("error retrieving kinesis shards: %w", err)
-	}
-
-	var startingPosition types.StartingPosition
-	if s.config.StartFromLatest {
-		startingPosition.Type = types.ShardIteratorTypeLatest
-	} else {
-		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
-	}
-
-	// get iterators for shards
-	for _, shard := range listShardsResponse.Shards {
-		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
-			ConsumerARN:      consumerResponse.Consumer.ConsumerARN,
-			ShardId:          shard.ShardId,
-			StartingPosition: &startingPosition,
-		})
-		if err != nil {
-			return fmt.Errorf("error creating stream subscription: %w", err)
-		}
-
-		shard := Shard{
-			EventStream: subscriptionResponse.GetStream(),
-			ShardID:     shard.ShardId,
-		}
-
-		s.shards = append(s.shards, shard)
-	}
+	go s.startSubscriptions(ctx)
 
 	return nil
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
-	// Read returns a new Record and is supposed to block until there is either
-	// a new record or the context gets cancelled. It can also return the error
-	// ErrBackoffRetry to signal to the SDK it should call Read again with a
-	// backoff retry.
-	// If Read receives a cancelled context or the context is cancelled while
-	// Read is running it must stop retrieving new records from the source
-	// system and start returning records that have already been buffered. If
-	// there are no buffered records left Read must return the context error to
-	// signal a graceful stop. If Read returns ErrBackoffRetry while the context
-	// is cancelled it will also signal that there are no records left and Read
-	// won't be called again.
-	// After Read returns an error the function won't be called again (except if
-	// the error is ErrBackoffRetry, as mentioned above).
-	// Read can be called concurrently with Ack.
-
-	// refresh the event streams everytime we call read, ie after backoff or initial load
-	for _, shard := range s.shards {
-		go func(shard Shard) {
-			event := <-shard.EventStream.Events()
-			if event == nil {
-				return
-			}
-
-			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
-
-			if len(eventValue.Records) > 0 {
-				recs := toRecords(eventValue.Records, shard.ShardID)
-
-				for _, record := range recs {
-					s.buffer <- record
-				}
-			}
-		}(shard)
-	}
-
-	select {
-	case rec := <-s.buffer:
-		return rec, nil
-	case <-time.After(time.Second * 5):
-		// 10 second timeout if theres no record in the buffer
-		return sdk.Record{}, sdk.ErrBackoffRetry
-	}
+	rec := <-s.buffer
+	return rec, nil
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
@@ -223,8 +150,10 @@ func (s *Source) Teardown(ctx context.Context) error {
 	// Teardown signals to the plugin that there will be no more calls to any
 	// other function. After Teardown returns, the plugin should be ready for a
 	// graceful shutdown.
-	for _, stream := range s.eventStreams {
-		stream.Close()
+	for _, stream := range s.shards {
+		if stream.EventStream != nil {
+			stream.EventStream.Close()
+		}
 	}
 
 	if s.consumerARN != "" {
@@ -260,4 +189,76 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 	}
 
 	return sdkRecs
+}
+
+// keep subscriptions alive for 5 minutes, then refresh
+func (s *Source) startSubscriptions(ctx context.Context) error {
+	var startingPosition types.StartingPosition
+	if s.config.StartFromLatest {
+		startingPosition.Type = types.ShardIteratorTypeLatest
+	} else {
+		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
+	}
+
+	// get shards
+	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
+		StreamARN: &s.config.StreamARN,
+	})
+	if err != nil {
+		return fmt.Errorf("error retrieving kinesis shards: %w", err)
+	}
+
+	for _, shard := range listShardsResponse.Shards {
+		s.shards = append(s.shards, Shard{
+			ShardID: shard.ShardId,
+		})
+	}
+
+	// get iterators for shards
+	for _, shard := range s.shards {
+		shard := shard
+
+		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
+			ConsumerARN:      &s.consumerARN,
+			ShardId:          shard.ShardID,
+			StartingPosition: &startingPosition,
+		})
+		if err != nil {
+			return fmt.Errorf("error creating stream subscription: %w", err)
+		}
+
+		shard.EventStream = subscriptionResponse.GetStream()
+
+		go func() {
+			event := <-shard.EventStream.Events()
+			if event == nil {
+				return
+			}
+
+			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+
+			if len(eventValue.Records) > 0 {
+				recs := toRecords(eventValue.Records, shard.ShardID)
+
+				for _, record := range recs {
+					s.buffer <- record
+				}
+			}
+		}()
+	}
+
+	// block for 5 minutes then refresh the streams
+	<-time.After((4 * time.Minute) + (59 * time.Second))
+	for _, shard := range s.shards {
+		// close the streams so we can reopen them later
+		if shard.EventStream != nil {
+			shard.EventStream.Close()
+		}
+	}
+
+	s.shards = make([]Shard, 0)
+
+	go s.startSubscriptions(ctx)
+
+	return nil
 }
