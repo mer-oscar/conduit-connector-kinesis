@@ -1,5 +1,5 @@
-# Conduit Connector for <resource>
-[Conduit](https://conduit.io) for <resource>.
+# Conduit Connector for AWS Kinesis
+[Conduit](https://conduit.io) for [AWS Kinesis](https://).
 
 ## How to build?
 Run `make build` to build the connector.

@@ -138,10 +138,14 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 	// create the put records request
 	for j := 0; j < len(records); j++ {
-		key := string(records[j].Key.Bytes())
+		pKey := string(records[j].Key.Bytes())
+		if len(pKey) > 256 {
+			pKey = pKey[:256]
+		}
+
 		recordEntry := types.PutRecordsRequestEntry{
 			Data:         records[j].Bytes(),
-			PartitionKey: &key,
+			PartitionKey: &pKey,
 		}
 		entries = append(entries, recordEntry)
 	}

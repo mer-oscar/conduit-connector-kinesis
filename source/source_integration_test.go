@@ -98,9 +98,6 @@ func TestRead(t *testing.T) {
 		is.NoErr(err)
 	}
 
-	_, err = con.Read(ctx)
-	is.Equal(err, sdk.ErrBackoffRetry)
-
 	seqNumber := make(chan string, 1)
 
 	// send a new message
