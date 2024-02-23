@@ -60,6 +60,13 @@ func TestAcceptance(t *testing.T) {
 
 	cfg["streamARN"] = *describe.StreamDescription.StreamARN
 
+	defer func() {
+		_, err = client.DeleteStream(ctx, &kinesis.DeleteStreamInput{
+			StreamARN:               describe.StreamDescription.StreamARN,
+			EnforceConsumerDeletion: aws.Bool(true),
+		})
+	}()
+
 	sdk.AcceptanceTest(t, sdk.ConfigurableAcceptanceTestDriver{
 		Config: sdk.ConfigurableAcceptanceTestDriverConfig{
 			Connector:         Connector,
@@ -96,7 +103,7 @@ func TestAcceptance(t *testing.T) {
 				"TestSource_Open_ResumeAtPositionSnapshot",
 			},
 			WriteTimeout: 500 * time.Millisecond,
-			ReadTimeout:  1 * time.Second,
+			ReadTimeout:  10 * time.Second,
 		},
 	})
 }

@@ -2,8 +2,10 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -33,7 +35,7 @@ type Shard struct {
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		buffer: make(chan sdk.Record, 1),
+		buffer: make(chan sdk.Record, 10000),
 	}, sdk.DefaultSourceMiddleware()...)
 }
 
@@ -119,14 +121,32 @@ func (s *Source) Open(ctx context.Context, _ sdk.Position) error {
 
 	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
 
-	go s.startSubscriptions(ctx)
-
 	return nil
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
-	rec := <-s.buffer
-	return rec, nil
+	backoff := make(chan error, 1)
+
+	if len(s.shards) == 0 {
+		go func() {
+			backoff <- s.startSubscriptions(ctx)
+		}()
+	}
+
+	select {
+	case rec := <-s.buffer:
+		return rec, nil
+	case err := <-backoff:
+		sdk.Logger(ctx).Error().Msg(err.Error())
+
+		if errors.Is(err, errors.New("refresh")) {
+			return sdk.Record{}, sdk.ErrBackoffRetry
+		}
+
+		return sdk.Record{}, err
+	default:
+		return sdk.Record{}, sdk.ErrBackoffRetry
+	}
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
@@ -155,14 +175,14 @@ func (s *Source) Teardown(ctx context.Context) error {
 		}
 	}
 
-	if s.consumerARN != "" {
-		_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
-			ConsumerARN: &s.consumerARN,
-		})
-		if err != nil {
-			return err
-		}
-	}
+	// if s.consumerARN != "" {
+	// 	_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
+	// 		ConsumerARN: &s.consumerARN,
+	// 	})
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
 
 	return nil
 }
@@ -192,18 +212,7 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 
 // keep subscriptions alive for 5 minutes, then refresh
 func (s *Source) startSubscriptions(ctx context.Context) error {
-	defer func() {
-		for _, shard := range s.shards {
-			// close the streams so we can reopen them later
-			if shard.EventStream != nil {
-				shard.EventStream.Close()
-			}
-		}
-
-		go s.startSubscriptions(ctx)
-	}()
-
-	s.shards = make([]Shard, 0)
+	errChan := make(chan error, 1)
 
 	var startingPosition types.StartingPosition
 	if s.config.StartFromLatest {
@@ -226,17 +235,25 @@ func (s *Source) startSubscriptions(ctx context.Context) error {
 		})
 	}
 
+	defer func() {
+		for _, shard := range s.shards {
+			// close the streams so we can reopen them later
+			if shard.EventStream != nil {
+				shard.EventStream.Close()
+			}
+		}
+	}()
+
 	// get iterators for shards
 	for _, shard := range s.shards {
 		shard := shard
-
 		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
 			ConsumerARN:      &s.consumerARN,
 			ShardId:          shard.ShardID,
 			StartingPosition: &startingPosition,
 		})
 		if err != nil {
-			return fmt.Errorf("error creating stream subscription: %w", err)
+			errChan <- fmt.Errorf("error creating stream subscription: %w", err)
 		}
 
 		shard.EventStream = subscriptionResponse.GetStream()
@@ -259,5 +276,19 @@ func (s *Source) startSubscriptions(ctx context.Context) error {
 		}()
 	}
 
-	return nil
+	go func() {
+		select {
+		case <-time.After(time.Minute * 5):
+			errChan <- fmt.Errorf("refresh")
+		case <-ctx.Done():
+			errChan <- ctx.Err()
+		}
+	}()
+
+	select {
+	case err := <-errChan:
+		return err
+	default:
+		return nil
+	}
 }
