@@ -129,11 +129,13 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 
 	if len(s.shards) == 0 {
 		go func() {
-			backoff <- s.startSubscriptions(ctx)
+			backoff <- s.startSubscriptions(ctx, s.config.StartFromLatest)
 		}()
 	}
 
 	select {
+	case <-ctx.Done():
+		return sdk.Record{}, ctx.Err()
 	case rec := <-s.buffer:
 		return rec, nil
 	case err := <-backoff:
@@ -144,8 +146,6 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		}
 
 		return sdk.Record{}, err
-	default:
-		return sdk.Record{}, sdk.ErrBackoffRetry
 	}
 }
 
@@ -211,14 +211,14 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 }
 
 // keep subscriptions alive for 5 minutes, then refresh
-func (s *Source) startSubscriptions(ctx context.Context) error {
+func (s *Source) startSubscriptions(ctx context.Context, cdc bool) error {
 	errChan := make(chan error, 1)
 
 	var startingPosition types.StartingPosition
-	if s.config.StartFromLatest {
+	startingPosition.Type = types.ShardIteratorTypeTrimHorizon
+
+	if cdc {
 		startingPosition.Type = types.ShardIteratorTypeLatest
-	} else {
-		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
 	}
 
 	// get shards
@@ -289,6 +289,7 @@ func (s *Source) startSubscriptions(ctx context.Context) error {
 	case err := <-errChan:
 		return err
 	default:
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 }
