@@ -61,13 +61,28 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 	}
 
 	// Configure the creds for the client
+	var cfgOptions []func(*config.LoadOptions) error
+	cfgOptions = append(cfgOptions, config.WithRegion(s.config.AWSRegion))
+	cfgOptions = append(cfgOptions, config.WithCredentialsProvider(
+		credentials.NewStaticCredentialsProvider(
+			s.config.AWSAccessKeyID,
+			s.config.AWSSecretAccessKey,
+			"")))
+
+	if s.config.AWSURL != "" {
+		cfgOptions = append(cfgOptions, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
+			return aws.Endpoint{
+				PartitionID:       "aws",
+				URL:               s.config.AWSURL,
+				SigningRegion:     s.config.AWSRegion,
+				HostnameImmutable: true,
+			}, nil
+		},
+		)))
+	}
+
 	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(s.config.AWSRegion),
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(
-				s.config.AWSAccessKeyID,
-				s.config.AWSSecretAccessKey,
-				"")),
+		cfgOptions...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
@@ -105,8 +120,10 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	}
 
 	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
-	go s.subscribeShards(ctx)
-	go s.listenEvents(ctx)
+	err = s.subscribeShards(ctx)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -126,11 +143,16 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	// After Read returns an error the function won't be called again (except if
 	// the error is ErrBackoffRetry, as mentioned above).
 	// Read can be called concurrently with Ack.
+	go s.listenEvents(ctx)
+
 	select {
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
 	case rec := <-s.buffer:
 		return rec, nil
+	case <-time.After(time.Second * 10):
+		// 10 second timeout if theres no record in the buffer
+		return sdk.Record{}, sdk.ErrBackoffRetry
 	}
 }
 
@@ -188,33 +210,39 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 
 func (s *Source) listenEvents(ctx context.Context) {
 	for _, shard := range s.shards {
-		go func(shard Shard) {
-			event := <-shard.EventStream.Events()
-			if event == nil {
-				return
-			}
-
+		shard := shard
+		event := <-shard.EventStream.Events()
+		if event != nil {
 			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
 
 			if len(eventValue.Records) > 0 {
+				fmt.Println(len(eventValue.Records))
 				recs := toRecords(eventValue.Records, shard.ShardID)
 
 				for _, record := range recs {
 					s.buffer <- record
 				}
 			}
-		}(shard)
+		}
 	}
 
-	go func() {
-		<-time.After(time.Minute * 5)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Minute * 5):
+		for _, stream := range s.shards {
+			if stream.EventStream != nil {
+				stream.EventStream.Close()
+			}
+		}
+
 		s.shards = make([]Shard, 0)
 
 		err := s.subscribeShards(ctx)
 		if err != nil {
 			sdk.Logger(ctx).Error().Msg("error resubscribing to shards")
 		}
-	}()
+	}
 }
 
 func (s *Source) subscribeShards(ctx context.Context) error {
