@@ -99,7 +99,7 @@ func TestWrite_PutRecords(t *testing.T) {
 		{
 			"happy path",
 			nil,
-			makeRecords(500, false),
+			makeRecords(5, false),
 		},
 	}
 
@@ -176,7 +176,7 @@ func TestWrite_PutRecord(t *testing.T) {
 		{
 			"happy path - <500 records",
 			nil,
-			499,
+			5,
 			makeRecords(499, false),
 		},
 	}

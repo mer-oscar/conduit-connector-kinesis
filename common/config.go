@@ -1,8 +1,5 @@
 package common
 
-// Config contains shared config parameters, common to the source and
-// destination. If you don't need shared parameters you can entirely remove this
-// file.
 type Config struct {
 	// amazon access key id
 	AWSAccessKeyID string `json:"aws.accessKeyId" validate:"required"`

@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -115,10 +116,20 @@ func TestRead(t *testing.T) {
 	// receive value so we know theres one in the buffer before calling read
 	sequenceNumber := <-seqNumber
 
-	rec, err := con.Read(ctx)
-	is.NoErr(err)
+	var readRec sdk.Record
+	for {
+		rec, err := con.Read(ctx)
+		if errors.Is(err, sdk.ErrBackoffRetry) {
+			continue
+		}
 
-	is.Equal(sequenceNumber, rec.Metadata["sequenceNumber"])
+		is.NoErr(err)
+		readRec = rec
+
+		break
+	}
+
+	is.Equal(sequenceNumber, readRec.Metadata["sequenceNumber"])
 
 	// send value and then block read until it comes in
 	go func() {
@@ -131,8 +142,16 @@ func TestRead(t *testing.T) {
 	}()
 
 	// expect message to be read from subscription before timeout
-	_, err = con.Read(ctx)
-	is.NoErr(err)
+	for {
+		_, err := con.Read(ctx)
+		if errors.Is(err, sdk.ErrBackoffRetry) {
+			continue
+		}
+
+		is.NoErr(err)
+
+		break
+	}
 
 	// full 5 second timeout
 	_, err = con.Read(ctx)
