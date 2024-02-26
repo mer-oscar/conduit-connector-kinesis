@@ -2,7 +2,6 @@ package source
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -35,7 +34,7 @@ type Shard struct {
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		buffer: make(chan sdk.Record, 10000),
+		buffer: make(chan sdk.Record, 1),
 	}, sdk.DefaultSourceMiddleware()...)
 }
 
@@ -62,38 +61,24 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 	}
 
 	// Configure the creds for the client
-	var cfgOptions []func(*config.LoadOptions) error
-	cfgOptions = append(cfgOptions, config.WithRegion(s.config.AWSRegion))
-	cfgOptions = append(cfgOptions, config.WithCredentialsProvider(
-		credentials.NewStaticCredentialsProvider(
-			s.config.AWSAccessKeyID,
-			s.config.AWSSecretAccessKey,
-			"")))
-
-	if s.config.AWSURL != "" {
-		cfgOptions = append(cfgOptions, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
-			return aws.Endpoint{
-				PartitionID:       "aws",
-				URL:               s.config.AWSURL,
-				SigningRegion:     s.config.AWSRegion,
-				HostnameImmutable: true,
-			}, nil
-		},
-		)))
-	}
-
 	awsCfg, err := config.LoadDefaultConfig(ctx,
-		cfgOptions...,
+		config.WithRegion(s.config.AWSRegion),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				s.config.AWSAccessKeyID,
+				s.config.AWSSecretAccessKey,
+				"")),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
+
 	s.client = kinesis.NewFromConfig(awsCfg)
 
 	return nil
 }
 
-func (s *Source) Open(ctx context.Context, _ sdk.Position) error {
+func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	// Open is called after Configure to signal the plugin it can prepare to
 	// start producing records. If needed, the plugin should open connections in
 	// this function. The position parameter will contain the position of the
@@ -120,32 +105,32 @@ func (s *Source) Open(ctx context.Context, _ sdk.Position) error {
 	}
 
 	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
+	go s.subscribeShards(ctx)
+	go s.listenEvents(ctx)
 
 	return nil
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
-	backoff := make(chan error, 1)
-
-	if len(s.shards) == 0 {
-		go func() {
-			backoff <- s.startSubscriptions(ctx, s.config.StartFromLatest)
-		}()
-	}
-
+	// Read returns a new Record and is supposed to block until there is either
+	// a new record or the context gets cancelled. It can also return the error
+	// ErrBackoffRetry to signal to the SDK it should call Read again with a
+	// backoff retry.
+	// If Read receives a cancelled context or the context is cancelled while
+	// Read is running it must stop retrieving new records from the source
+	// system and start returning records that have already been buffered. If
+	// there are no buffered records left Read must return the context error to
+	// signal a graceful stop. If Read returns ErrBackoffRetry while the context
+	// is cancelled it will also signal that there are no records left and Read
+	// won't be called again.
+	// After Read returns an error the function won't be called again (except if
+	// the error is ErrBackoffRetry, as mentioned above).
+	// Read can be called concurrently with Ack.
 	select {
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
 	case rec := <-s.buffer:
 		return rec, nil
-	case err := <-backoff:
-		sdk.Logger(ctx).Error().Msg(err.Error())
-
-		if errors.Is(err, errors.New("refresh")) {
-			return sdk.Record{}, sdk.ErrBackoffRetry
-		}
-
-		return sdk.Record{}, err
 	}
 }
 
@@ -175,15 +160,6 @@ func (s *Source) Teardown(ctx context.Context) error {
 		}
 	}
 
-	// if s.consumerARN != "" {
-	// 	_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
-	// 		ConsumerARN: &s.consumerARN,
-	// 	})
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// }
-
 	return nil
 }
 
@@ -210,55 +186,9 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 	return sdkRecs
 }
 
-// keep subscriptions alive for 5 minutes, then refresh
-func (s *Source) startSubscriptions(ctx context.Context, cdc bool) error {
-	errChan := make(chan error, 1)
-
-	var startingPosition types.StartingPosition
-	startingPosition.Type = types.ShardIteratorTypeTrimHorizon
-
-	if cdc {
-		startingPosition.Type = types.ShardIteratorTypeLatest
-	}
-
-	// get shards
-	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
-		StreamARN: &s.config.StreamARN,
-	})
-	if err != nil {
-		return fmt.Errorf("error retrieving kinesis shards: %w", err)
-	}
-
-	for _, shard := range listShardsResponse.Shards {
-		s.shards = append(s.shards, Shard{
-			ShardID: shard.ShardId,
-		})
-	}
-
-	defer func() {
-		for _, shard := range s.shards {
-			// close the streams so we can reopen them later
-			if shard.EventStream != nil {
-				shard.EventStream.Close()
-			}
-		}
-	}()
-
-	// get iterators for shards
+func (s *Source) listenEvents(ctx context.Context) {
 	for _, shard := range s.shards {
-		shard := shard
-		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
-			ConsumerARN:      &s.consumerARN,
-			ShardId:          shard.ShardID,
-			StartingPosition: &startingPosition,
-		})
-		if err != nil {
-			errChan <- fmt.Errorf("error creating stream subscription: %w", err)
-		}
-
-		shard.EventStream = subscriptionResponse.GetStream()
-
-		go func() {
+		go func(shard Shard) {
 			event := <-shard.EventStream.Events()
 			if event == nil {
 				return
@@ -273,23 +203,54 @@ func (s *Source) startSubscriptions(ctx context.Context, cdc bool) error {
 					s.buffer <- record
 				}
 			}
-		}()
+		}(shard)
 	}
 
 	go func() {
-		select {
-		case <-time.After(time.Minute * 5):
-			errChan <- fmt.Errorf("refresh")
-		case <-ctx.Done():
-			errChan <- ctx.Err()
+		<-time.After(time.Minute * 5)
+		s.shards = make([]Shard, 0)
+
+		err := s.subscribeShards(ctx)
+		if err != nil {
+			sdk.Logger(ctx).Error().Msg("error resubscribing to shards")
 		}
 	}()
+}
 
-	select {
-	case err := <-errChan:
-		return err
-	default:
-		<-ctx.Done()
-		return ctx.Err()
+func (s *Source) subscribeShards(ctx context.Context) error {
+	// get shards
+	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
+		StreamARN: &s.config.StreamARN,
+	})
+	if err != nil {
+		return fmt.Errorf("error retrieving kinesis shards: %w", err)
 	}
+
+	var startingPosition types.StartingPosition
+	if s.config.StartFromLatest {
+		startingPosition.Type = types.ShardIteratorTypeLatest
+	} else {
+		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
+	}
+
+	// get iterators for shards
+	for _, shard := range listShardsResponse.Shards {
+		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
+			ConsumerARN:      &s.consumerARN,
+			ShardId:          shard.ShardId,
+			StartingPosition: &startingPosition,
+		})
+		if err != nil {
+			return fmt.Errorf("error creating stream subscription: %w", err)
+		}
+
+		shard := Shard{
+			EventStream: subscriptionResponse.GetStream(),
+			ShardID:     shard.ShardId,
+		}
+
+		s.shards = append(s.shards, shard)
+	}
+
+	return nil
 }
