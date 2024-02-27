@@ -3,6 +3,7 @@ package destination
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -42,21 +43,10 @@ func NewDestination() sdk.Destination {
 }
 
 func (d *Destination) Parameters() map[string]sdk.Parameter {
-	// Parameters is a map of named Parameters that describe how to configure
-	// the Destination. Parameters can be generated from DestinationConfig with
-	// paramgen.
 	return Config{}.Parameters()
 }
 
 func (d *Destination) Configure(ctx context.Context, cfg map[string]string) error {
-	// Configure is the first function to be called in a connector. It provides
-	// the connector with the configuration that can be validated and stored.
-	// In case the configuration is not valid it should return an error.
-	// Testing if your connector can reach the configured data source should be
-	// done in Open, not in Configure.
-	// The SDK will validate the configuration and populate default values
-	// before calling Configure. If you need to do more complex validations you
-	// can do them manually here.
 	sdk.Logger(ctx).Info().Msg("Configuring Destination...")
 	err := sdk.Util.ParseConfig(cfg, &d.config)
 	if err != nil {
@@ -97,10 +87,6 @@ func (d *Destination) Configure(ctx context.Context, cfg map[string]string) erro
 }
 
 func (d *Destination) Open(ctx context.Context) error {
-	// Open is called after Configure to signal the plugin it can prepare to
-	// start writing records. If needed, the plugin should open connections in
-	// this function.
-
 	// DescribeStream to know that the stream ARN is valid and usable, ie test connection
 	_, err := d.client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamARN: &d.config.StreamARN,
@@ -170,6 +156,7 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 		written++
 	}
 
+	sdk.Logger(ctx).Debug().Msg("wrote " + strconv.Itoa(written) + " records to destination")
 	return written, nil
 }
 

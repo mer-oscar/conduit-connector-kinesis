@@ -1,0 +1,21 @@
+version: 2.0
+pipelines:
+  - id: kinesis-to-file
+    status: running
+    description: >
+       Kinesis src -> File dst
+    connectors:
+      - id: file-source
+        type: destination
+        plugin: builtin:file
+        settings:
+          path: /app/example.out
+      - id: src-kinesis
+        type: source
+        plugin: standalone:kinesis
+        settings:
+          streamARN: arn:aws:kinesis:us-east-1:000000000000:stream/stream1
+          aws.region: us-east-1
+          aws.accessKeyId: accesskeymock
+          aws.secretAccessKey: accesssecretmock
+          aws.url: http://host.docker.internal:4566

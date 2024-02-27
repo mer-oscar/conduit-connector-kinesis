@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
+	"github.com/google/uuid"
 )
 
 type Source struct {
@@ -24,7 +25,7 @@ type Source struct {
 
 	shards      []Shard
 	buffer      chan sdk.Record
-	consumerARN string
+	consumerARN *string
 }
 
 type Shard struct {
@@ -95,13 +96,13 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	// register consumer
 	consumerResponse, err := s.client.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
 		StreamARN:    &s.config.StreamARN,
-		ConsumerName: aws.String("conduit-connector-kinesis-source"),
+		ConsumerName: aws.String("conduit-connector-kinesis-source-" + uuid.NewString()),
 	})
 	if err != nil {
 		return fmt.Errorf("error registering consumer: %w", err)
 	}
 
-	s.consumerARN = *consumerResponse.Consumer.ConsumerARN
+	s.consumerARN = consumerResponse.Consumer.ConsumerARN
 	err = s.subscribeShards(ctx)
 	if err != nil {
 		return err
@@ -118,9 +119,6 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		return sdk.Record{}, ctx.Err()
 	case rec := <-s.buffer:
 		return rec, nil
-	case <-time.After(time.Second * 3):
-		// 3 second timeout if theres no record in the buffer
-		return sdk.Record{}, sdk.ErrBackoffRetry
 	}
 }
 
@@ -138,6 +136,17 @@ func (s *Source) Teardown(ctx context.Context) error {
 	for _, stream := range s.shards {
 		if stream.EventStream != nil {
 			stream.EventStream.Close()
+		}
+	}
+
+	if s.consumerARN != nil {
+		_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
+			ConsumerARN: s.consumerARN,
+			StreamARN:   &s.config.StreamARN,
+		})
+
+		if err != nil {
+			return err
 		}
 	}
 
@@ -222,7 +231,7 @@ func (s *Source) subscribeShards(ctx context.Context) error {
 	// get iterators for shards
 	for _, shard := range listShardsResponse.Shards {
 		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
-			ConsumerARN:      &s.consumerARN,
+			ConsumerARN:      s.consumerARN,
 			ShardId:          shard.ShardId,
 			StartingPosition: &startingPosition,
 		})

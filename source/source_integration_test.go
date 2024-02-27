@@ -39,7 +39,7 @@ func TestTeardown_Open(t *testing.T) {
 
 	// cleanupTest deletes the stream
 	cleanupTest(ctx, con.client, con.config.StreamARN)
-	con.consumerARN = ""
+	con.consumerARN = nil
 
 	err = con.Teardown(ctx)
 	is.NoErr(err)
@@ -59,7 +59,7 @@ func TestRead(t *testing.T) {
 
 	defer func() {
 		cleanupTest(ctx, con.client, con.config.StreamARN)
-		con.consumerARN = ""
+		con.consumerARN = nil
 
 		err := con.Teardown(ctx)
 		is.NoErr(err)
