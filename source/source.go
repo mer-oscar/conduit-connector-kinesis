@@ -33,7 +33,7 @@ type Shard struct {
 	EventStream *kinesis.SubscribeToShardEventStream
 }
 
-func NewSource() sdk.Source {
+func New() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
 		buffer: make(chan sdk.Record, 1),
 	}, sdk.DefaultSourceMiddleware()...)

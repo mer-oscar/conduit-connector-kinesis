@@ -9,6 +9,6 @@ import (
 // Connector combines all constructors for each plugin in one struct.
 var Connector = sdk.Connector{
 	NewSpecification: Specification,
-	NewSource:        source.NewSource,
-	NewDestination:   destination.NewDestination,
+	NewSource:        source.New,
+	NewDestination:   destination.New,
 }

@@ -28,7 +28,7 @@ type Destination struct {
 }
 
 // NewDestination creates a Destination and wrap it in the default middleware.
-func NewDestination() sdk.Destination {
+func New() sdk.Destination {
 	middlewares := sdk.DefaultDestinationMiddleware()
 	for i, m := range middlewares {
 		switch dest := m.(type) {
@@ -92,6 +92,7 @@ func (d *Destination) Open(ctx context.Context) error {
 		StreamARN: &d.config.StreamARN,
 	})
 	if err != nil {
+		sdk.Logger(ctx).Err(err)
 		sdk.Logger(ctx).Error().Msg("error when attempting to test connection to stream")
 		return err
 	}
@@ -150,13 +151,14 @@ func (d *Destination) Write(ctx context.Context, records []sdk.Record) (int, err
 
 	for _, rec := range output.Records {
 		if rec.ErrorCode != nil {
-			sdk.Logger(ctx).Error().Msg("error when attempting to insert record: " + *rec.ErrorCode + " " + *rec.ErrorMessage)
+			sdk.Logger(ctx).Error().Msgf("error when attempting to insert record %s: %s", *rec.ErrorCode, *rec.ErrorMessage)
+			sdk.Logger(ctx).Error().Str("error_code", *rec.ErrorCode)
 			continue
 		}
 		written++
 	}
 
-	sdk.Logger(ctx).Debug().Msg("wrote " + strconv.Itoa(written) + " records to destination")
+	sdk.Logger(ctx).Debug().Msgf("wrote %s records to destination", strconv.Itoa(written))
 	return written, nil
 }
 

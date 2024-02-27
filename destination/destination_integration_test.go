@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/matryer/is"
+	"github.com/oklog/ulid/v2"
+	"github.com/rs/zerolog"
 )
 
 var cfg map[string]string = map[string]string{
@@ -26,9 +28,12 @@ var cfg map[string]string = map[string]string{
 }
 
 func setupDestinationTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
-	streamName := "stream-destination"
+	testID, err := ulid.New(ulid.Timestamp(time.Now()), nil)
+	is.NoErr(err)
+
+	streamName := "stream-destination" + testID.String()
 	// create stream
-	_, err := client.CreateStream(ctx, &kinesis.CreateStreamInput{
+	_, err = client.CreateStream(ctx, &kinesis.CreateStreamInput{
 		StreamName: &streamName,
 	})
 	if err != nil {
@@ -39,14 +44,10 @@ func setupDestinationTest(ctx context.Context, client *kinesis.Client, is *is.I)
 		is.NoErr(err)
 	}
 
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 1)
 	describe, err := client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
 	})
-	if err != nil {
-		// try to set up the stream again
-		return setupDestinationTest(ctx, client, is)
-	}
 	is.NoErr(err)
 
 	return *describe.StreamDescription.StreamARN
@@ -59,7 +60,7 @@ func cleanupTest(ctx context.Context, client *kinesis.Client, streamARN string) 
 	})
 
 	if err != nil {
-		fmt.Println("failed to delete stream")
+		sdk.Logger(ctx).Err(err)
 	}
 }
 
@@ -82,7 +83,8 @@ func TestTeardown_Open(t *testing.T) {
 }
 
 func TestWrite_PutRecords(t *testing.T) {
-	ctx := context.Background()
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+	ctx := logger.WithContext(context.Background())
 	is := is.New(t)
 	con := Destination{}
 
@@ -156,7 +158,8 @@ func TestWrite_PutRecords(t *testing.T) {
 }
 
 func TestWrite_PutRecord(t *testing.T) {
-	ctx := context.Background()
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+	ctx := logger.WithContext(context.Background())
 	is := is.New(t)
 	con := Destination{}
 

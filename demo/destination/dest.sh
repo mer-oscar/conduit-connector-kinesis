@@ -11,6 +11,3 @@ cd test/destination && docker run -it -p 8080:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e CONDUIT_LOG_LEVEL=debug \
   conduit_with_kinesis:latest \
-
-
-  
