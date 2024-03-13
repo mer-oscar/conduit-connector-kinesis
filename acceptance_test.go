@@ -103,8 +103,8 @@ func TestAcceptance(t *testing.T) {
 				"TestSource_Open_ResumeAtPositionSnapshot",
 			},
 			WriteTimeout: 500 * time.Millisecond,
-			// 5 second timeout to account for http strangeness
-			ReadTimeout: 5000 * time.Millisecond,
+			// 3 second timeout to account for http strangeness
+			ReadTimeout: 3 * time.Second,
 		},
 	})
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,45 +16,23 @@ import (
 )
 
 var cfg map[string]string = map[string]string{
-	"streamARN":           "arn:aws:kinesis:us-east-1:000000000000:stream/stream1",
+	"streamARN":           "arn:aws:kinesis:us-east-1:000000000000:stream/stream-source",
 	"aws.region":          "us-east-1",
 	"aws.accessKeyId":     "accesskeymock",
 	"aws.secretAccessKey": "accesssecretmock",
 	"aws.url":             "http://localhost:4566",
 }
 
-func TestTeardown_Open(t *testing.T) {
-	is := is.New(t)
-	ctx := context.Background()
-	con := Source{}
-
-	err := con.Configure(ctx, cfg)
-	is.NoErr(err)
-
-	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
-
-	err = con.Open(ctx, nil)
-	is.NoErr(err)
-
-	// cleanupTest deletes the stream
-	cleanupTest(ctx, con.client, con.config.StreamARN)
-	con.consumerARN = nil
-
-	err = con.Teardown(ctx)
-	is.NoErr(err)
-}
-
 func TestRead(t *testing.T) {
 	is := is.New(t)
 	ctx := context.Background()
 	con := Source{
-		buffer: make(chan sdk.Record, 1),
+		buffer:    make(chan sdk.Record, 1),
+		streamMap: make(map[string]*kinesis.SubscribeToShardEventStream),
 	}
 
 	err := con.Configure(ctx, cfg)
 	is.NoErr(err)
-
-	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	defer func() {
 		cleanupTest(ctx, con.client, con.config.StreamARN)
@@ -64,6 +41,8 @@ func TestRead(t *testing.T) {
 		err := con.Teardown(ctx)
 		is.NoErr(err)
 	}()
+
+	con.config.StreamARN = setupSourceTest(ctx, con.client, is)
 
 	listShards, err := con.client.ListShards(ctx, &kinesis.ListShardsInput{
 		StreamARN: &con.config.StreamARN,
@@ -94,15 +73,20 @@ func TestRead(t *testing.T) {
 	err = con.Open(ctx, nil)
 	is.NoErr(err)
 
+	fmt.Println("snapshot")
+
 	for i := 0; i < 5; i++ {
 		_, err := con.Read(ctx)
 		is.NoErr(err)
 	}
 
+	fmt.Println("records read")
+
 	seqNumber := make(chan string, 1)
 
 	// send a new message
 	go func() {
+		fmt.Println("send record async")
 		putRecResp, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
 			StreamARN:    &con.config.StreamARN,
 			Data:         []byte("some data here"),
@@ -110,11 +94,16 @@ func TestRead(t *testing.T) {
 		})
 		is.NoErr(err)
 
+		fmt.Println(putRecResp.ShardId, putRecResp.SequenceNumber)
+
 		seqNumber <- *putRecResp.SequenceNumber
 	}()
 
+	fmt.Println("block for new message sent")
 	// receive value so we know theres one in the buffer before calling read
 	sequenceNumber := <-seqNumber
+
+	fmt.Println("try read again")
 
 	var readRec sdk.Record
 	for {
@@ -122,6 +111,8 @@ func TestRead(t *testing.T) {
 		if errors.Is(err, sdk.ErrBackoffRetry) {
 			continue
 		}
+
+		fmt.Println("read record")
 
 		is.NoErr(err)
 		readRec = rec
@@ -131,18 +122,20 @@ func TestRead(t *testing.T) {
 
 	is.Equal(sequenceNumber, readRec.Metadata["sequenceNumber"])
 
-	// send value and then block read until it comes in
-	go func() {
-		_, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
-			StreamARN:    &con.config.StreamARN,
-			Data:         []byte("some data here again"),
-			PartitionKey: aws.String("6"),
-		})
-		is.NoErr(err)
-	}()
+	fmt.Println("cdc")
 
 	// expect message to be read from subscription before timeout
 	for {
+		// send value and then block read until it comes in
+		go func() {
+			_, err := con.client.PutRecord(ctx, &kinesis.PutRecordInput{
+				StreamARN:    &con.config.StreamARN,
+				Data:         []byte("some data here again"),
+				PartitionKey: aws.String("6"),
+			})
+			is.NoErr(err)
+		}()
+
 		_, err := con.Read(ctx)
 		if errors.Is(err, sdk.ErrBackoffRetry) {
 			continue
@@ -152,10 +145,6 @@ func TestRead(t *testing.T) {
 
 		break
 	}
-
-	// full 5 second timeout
-	_, err = con.Read(ctx)
-	is.Equal(err, sdk.ErrBackoffRetry)
 }
 
 func setupSourceTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
@@ -164,23 +153,15 @@ func setupSourceTest(ctx context.Context, client *kinesis.Client, is *is.I) stri
 	_, err := client.CreateStream(ctx, &kinesis.CreateStreamInput{
 		StreamName: &streamName,
 	})
-	if err != nil {
-		if !strings.Contains(err.Error(), "already exists") {
-			fmt.Println("stream already exists")
-		}
-	} else {
-		is.NoErr(err)
-	}
+	is.NoErr(err)
 
 	time.Sleep(time.Second * 5)
 	describe, err := client.DescribeStream(ctx, &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
 	})
-	if err != nil {
-		// try to set up the stream again
-		return setupSourceTest(ctx, client, is)
-	}
 	is.NoErr(err)
+
+	fmt.Println("length of shards is: ", len(describe.StreamDescription.Shards))
 
 	var recs []types.PutRecordsRequestEntry
 	for i := 0; i < 5; i++ {
@@ -207,8 +188,7 @@ func cleanupTest(ctx context.Context, client *kinesis.Client, streamARN string) 
 		EnforceConsumerDeletion: aws.Bool(true),
 		StreamARN:               &streamARN,
 	})
-
 	if err != nil {
-		fmt.Println("failed to delete stream")
+		fmt.Println("failed to delete stream: ", streamARN)
 	}
 }

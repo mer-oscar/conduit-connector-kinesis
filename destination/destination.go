@@ -14,10 +14,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	defaultBatchSize = 500
-)
-
 type Destination struct {
 	sdk.UnimplementedDestination
 
@@ -27,19 +23,9 @@ type Destination struct {
 	client *kinesis.Client
 }
 
-// NewDestination creates a Destination and wrap it in the default middleware.
 func New() sdk.Destination {
-	middlewares := sdk.DefaultDestinationMiddleware()
-	for i, m := range middlewares {
-		switch dest := m.(type) {
-		case sdk.DestinationWithBatch:
-			dest.DefaultBatchSize = defaultBatchSize
-			middlewares[i] = dest
-		default:
-		}
-	}
-
-	return sdk.DestinationWithMiddleware(&Destination{}, middlewares...)
+	return sdk.DestinationWithMiddleware(&Destination{},
+		sdk.DefaultDestinationMiddleware()...)
 }
 
 func (d *Destination) Parameters() map[string]sdk.Parameter {

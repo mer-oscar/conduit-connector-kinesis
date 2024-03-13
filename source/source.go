@@ -23,7 +23,7 @@ type Source struct {
 	// client is the Client for the AWS Kinesis API
 	client *kinesis.Client
 
-	shards      []Shard
+	streamMap   map[string]*kinesis.SubscribeToShardEventStream
 	buffer      chan sdk.Record
 	consumerARN *string
 }
@@ -35,7 +35,8 @@ type Shard struct {
 
 func New() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		buffer: make(chan sdk.Record, 1),
+		buffer:    make(chan sdk.Record, 1),
+		streamMap: make(map[string]*kinesis.SubscribeToShardEventStream),
 	}, sdk.DefaultSourceMiddleware()...)
 }
 
@@ -108,12 +109,12 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		return err
 	}
 
+	go s.listenEvents(ctx)
+
 	return nil
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
-	go s.listenEvents(ctx)
-
 	select {
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
@@ -133,9 +134,9 @@ func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
 }
 
 func (s *Source) Teardown(ctx context.Context) error {
-	for _, stream := range s.shards {
-		if stream.EventStream != nil {
-			stream.EventStream.Close()
+	for _, stream := range s.streamMap {
+		if stream != nil {
+			stream.Close()
 		}
 	}
 
@@ -153,17 +154,17 @@ func (s *Source) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
+func toRecords(kinRecords []types.Record, shardID string) []sdk.Record {
 	var sdkRecs []sdk.Record
 
 	for _, rec := range kinRecords {
 		// composite key of partition key and sequence number
-		position := *shardID + "_" + *rec.SequenceNumber
+		position := shardID + "_" + *rec.SequenceNumber
 
 		sdkRec := sdk.Util.Source.NewRecordCreate(
 			sdk.Position(position),
 			sdk.Metadata{
-				"shardId":        *shardID,
+				"shardId":        shardID,
 				"sequenceNumber": *rec.SequenceNumber,
 			},
 			sdk.RawData(position),
@@ -177,37 +178,43 @@ func toRecords(kinRecords []types.Record, shardID *string) []sdk.Record {
 }
 
 func (s *Source) listenEvents(ctx context.Context) {
-	for _, shard := range s.shards {
-		shard := shard
-		event := <-shard.EventStream.Events()
-		if event != nil {
-			eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+	for shardID, eventStream := range s.streamMap {
+		shardID, eventStream := shardID, eventStream
 
-			if len(eventValue.Records) > 0 {
-				recs := toRecords(eventValue.Records, shard.ShardID)
+		go func() {
+			for {
+				event := <-eventStream.Events()
+				if event == nil {
+					break
+				}
 
-				for _, record := range recs {
-					s.buffer <- record
+				eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+
+				if len(eventValue.Records) > 0 {
+					recs := toRecords(eventValue.Records, shardID)
+
+					for _, record := range recs {
+						s.buffer <- record
+					}
 				}
 			}
-		}
+		}()
 	}
 
 	select {
 	case <-ctx.Done():
 		return
 	case <-time.After(time.Minute * 5):
-		for _, stream := range s.shards {
-			if stream.EventStream != nil {
-				stream.EventStream.Close()
+		for shardID, stream := range s.streamMap {
+			if stream != nil {
+				stream.Close()
 			}
-		}
 
-		s.shards = make([]Shard, 0)
-
-		err := s.subscribeShards(ctx)
-		if err != nil {
-			sdk.Logger(ctx).Error().Msg("error resubscribing to shards")
+			err := s.resubscribeShard(ctx, shardID)
+			if err != nil {
+				fmt.Println("error resub: ", err.Error())
+				sdk.Logger(ctx).Error().Msg("error resubscribing to shard")
+			}
 		}
 	}
 }
@@ -228,6 +235,8 @@ func (s *Source) subscribeShards(ctx context.Context) error {
 		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
 	}
 
+	s.config.StartFromLatest = true
+
 	// get iterators for shards
 	for _, shard := range listShardsResponse.Shards {
 		subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
@@ -239,13 +248,25 @@ func (s *Source) subscribeShards(ctx context.Context) error {
 			return fmt.Errorf("error creating stream subscription: %w", err)
 		}
 
-		shard := Shard{
-			EventStream: subscriptionResponse.GetStream(),
-			ShardID:     shard.ShardId,
-		}
-
-		s.shards = append(s.shards, shard)
+		s.streamMap[*shard.ShardId] = subscriptionResponse.GetStream()
 	}
+
+	return nil
+}
+
+func (s *Source) resubscribeShard(ctx context.Context, shardID string) error {
+	subscriptionResponse, err := s.client.SubscribeToShard(ctx, &kinesis.SubscribeToShardInput{
+		ConsumerARN: s.consumerARN,
+		ShardId:     aws.String(shardID),
+		StartingPosition: &types.StartingPosition{
+			Type: types.ShardIteratorTypeLatest,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("error creating stream subscription: %w", err)
+	}
+
+	s.streamMap[shardID] = subscriptionResponse.GetStream()
 
 	return nil
 }
