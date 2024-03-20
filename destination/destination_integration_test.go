@@ -28,12 +28,11 @@ var cfg map[string]string = map[string]string{
 }
 
 func setupDestinationTest(ctx context.Context, client *kinesis.Client, is *is.I) string {
-	testID, err := ulid.New(ulid.Timestamp(time.Now()), nil)
-	is.NoErr(err)
+	testID := ulid.Make()
 
 	streamName := "stream-destination" + testID.String()
 	// create stream
-	_, err = client.CreateStream(ctx, &kinesis.CreateStreamInput{
+	_, err := client.CreateStream(ctx, &kinesis.CreateStreamInput{
 		StreamName: &streamName,
 	})
 	if err != nil {
@@ -66,7 +65,8 @@ func cleanupTest(ctx context.Context, client *kinesis.Client, streamARN string) 
 
 func TestTeardown_Open(t *testing.T) {
 	is := is.New(t)
-	ctx := context.Background()
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+	ctx := logger.WithContext(context.Background())
 	con := Destination{}
 
 	err := con.Configure(ctx, cfg)

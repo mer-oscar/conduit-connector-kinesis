@@ -120,7 +120,7 @@ func TestRead(t *testing.T) {
 		break
 	}
 
-	is.Equal(sequenceNumber, readRec.Metadata["sequenceNumber"])
+	is.Equal("kinesis-"+sequenceNumber, readRec.Metadata["sequenceNumber"])
 
 	fmt.Println("cdc")
 

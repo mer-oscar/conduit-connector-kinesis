@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	sdk "github.com/conduitio/conduit-connector-sdk"
-	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
 )
 
 type Source struct {
@@ -72,9 +72,7 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 		)))
 	}
 
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		cfgOptions...,
-	)
+	awsCfg, err := config.LoadDefaultConfig(ctx, cfgOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
@@ -90,18 +88,20 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 		StreamARN: &s.config.StreamARN,
 	})
 	if err != nil {
-		sdk.Logger(ctx).Error().Msg("error when attempting to test connection to stream")
+		sdk.Logger(ctx).Err(err).Msg("error when attempting to test connection to stream")
 		return err
 	}
 
 	// register consumer
 	consumerResponse, err := s.client.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
 		StreamARN:    &s.config.StreamARN,
-		ConsumerName: aws.String("conduit-connector-kinesis-source-" + uuid.NewString()),
+		ConsumerName: aws.String("conduit-connector-kinesis-source-" + ulid.Make().String()),
 	})
 	if err != nil {
 		return fmt.Errorf("error registering consumer: %w", err)
 	}
+
+	sdk.Logger(ctx).Info().Msg("kinesis consumer registered: " + *consumerResponse.Consumer.ConsumerName)
 
 	s.consumerARN = consumerResponse.Consumer.ConsumerARN
 	err = s.subscribeShards(ctx)
@@ -126,8 +126,11 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
 	positionSplit := strings.Split(string(position), "_")
 
-	shardID := positionSplit[0]
-	seqNumber := positionSplit[1]
+	var shardID, seqNumber string
+	if len(positionSplit) == 2 {
+		shardID = positionSplit[0]
+		seqNumber = positionSplit[1]
+	}
 
 	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("ack'd record with shardID: %s and sequence number: %s", shardID, seqNumber))
 	return nil
@@ -164,8 +167,8 @@ func toRecords(kinRecords []types.Record, shardID string) []sdk.Record {
 		sdkRec := sdk.Util.Source.NewRecordCreate(
 			sdk.Position(position),
 			sdk.Metadata{
-				"shardId":        shardID,
-				"sequenceNumber": *rec.SequenceNumber,
+				"shardId":        "kinesis-" + shardID,
+				"sequenceNumber": "kinesis-" + *rec.SequenceNumber,
 			},
 			sdk.RawData(position),
 			sdk.RawData(rec.Data),
@@ -212,8 +215,7 @@ func (s *Source) listenEvents(ctx context.Context) {
 
 			err := s.resubscribeShard(ctx, shardID)
 			if err != nil {
-				fmt.Println("error resub: ", err.Error())
-				sdk.Logger(ctx).Error().Msg("error resubscribing to shard")
+				sdk.Logger(ctx).Err(err).Msg("error resubscribing to shard")
 			}
 		}
 	}
