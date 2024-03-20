@@ -72,9 +72,7 @@ func (s *Source) Configure(ctx context.Context, cfg map[string]string) error {
 		)))
 	}
 
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		cfgOptions...,
-	)
+	awsCfg, err := config.LoadDefaultConfig(ctx, cfgOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to load aws config with given credentials : %w", err)
 	}
