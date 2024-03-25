@@ -2,8 +2,8 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,9 +33,14 @@ type Shard struct {
 	EventStream *kinesis.SubscribeToShardEventStream
 }
 
+type kinesisPosition struct {
+	SequenceNumber string
+	ShardID        string
+}
+
 func New() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{
-		buffer:    make(chan sdk.Record, 1),
+		buffer:    make(chan sdk.Record, 100),
 		streamMap: make(map[string]*kinesis.SubscribeToShardEventStream),
 	}, sdk.DefaultSourceMiddleware()...)
 }
@@ -104,7 +109,7 @@ func (s *Source) Open(ctx context.Context, pos sdk.Position) error {
 	sdk.Logger(ctx).Info().Msg("kinesis consumer registered: " + *consumerResponse.Consumer.ConsumerName)
 
 	s.consumerARN = consumerResponse.Consumer.ConsumerARN
-	err = s.subscribeShards(ctx)
+	err = s.subscribeShards(ctx, pos)
 	if err != nil {
 		return err
 	}
@@ -124,33 +129,30 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 }
 
 func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
-	positionSplit := strings.Split(string(position), "_")
-
-	var shardID, seqNumber string
-	if len(positionSplit) == 2 {
-		shardID = positionSplit[0]
-		seqNumber = positionSplit[1]
+	pos, err := parsePosition(position)
+	if err != nil {
+		return err
 	}
 
-	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("ack'd record with shardID: %s and sequence number: %s", shardID, seqNumber))
+	sdk.Logger(ctx).Debug().Msg(fmt.Sprintf("ack'd record with shardID: %s and sequence number: %s", pos.ShardID, pos.SequenceNumber))
 	return nil
 }
 
 func (s *Source) Teardown(ctx context.Context) error {
+	// if s.consumerARN != nil {
+	// 	_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
+	// 		ConsumerARN: s.consumerARN,
+	// 		StreamARN:   &s.config.StreamARN,
+	// 	})
+
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+
 	for _, stream := range s.streamMap {
 		if stream != nil {
 			stream.Close()
-		}
-	}
-
-	if s.consumerARN != nil {
-		_, err := s.client.DeregisterStreamConsumer(ctx, &kinesis.DeregisterStreamConsumerInput{
-			ConsumerARN: s.consumerARN,
-			StreamARN:   &s.config.StreamARN,
-		})
-
-		if err != nil {
-			return err
 		}
 	}
 
@@ -161,16 +163,18 @@ func toRecords(kinRecords []types.Record, shardID string) []sdk.Record {
 	var sdkRecs []sdk.Record
 
 	for _, rec := range kinRecords {
-		// composite key of partition key and sequence number
-		position := shardID + "_" + *rec.SequenceNumber
+		var kinPos kinesisPosition
+		kinPos.SequenceNumber = *rec.SequenceNumber
+		kinPos.ShardID = shardID
 
+		kinPosBytes, _ := json.Marshal(kinPos)
 		sdkRec := sdk.Util.Source.NewRecordCreate(
-			sdk.Position(position),
+			sdk.Position(kinPosBytes),
 			sdk.Metadata{
 				"shardId":        "kinesis-" + shardID,
 				"sequenceNumber": "kinesis-" + *rec.SequenceNumber,
 			},
-			sdk.RawData(position),
+			sdk.RawData(kinPosBytes),
 			sdk.RawData(rec.Data),
 		)
 
@@ -186,42 +190,46 @@ func (s *Source) listenEvents(ctx context.Context) {
 
 		go func() {
 			for {
-				event := <-eventStream.Events()
-				if event == nil {
-					break
-				}
+				select {
+				case event := <-eventStream.Events():
+					if event == nil {
+						err := s.resubscribeShard(ctx, shardID)
+						if err != nil {
+							sdk.Logger(ctx).Err(err).Msg("error resubscribing to shard")
+							return
+						}
+					}
 
-				eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
+					eventValue := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent).Value
 
-				if len(eventValue.Records) > 0 {
-					recs := toRecords(eventValue.Records, shardID)
+					if len(eventValue.Records) > 0 {
+						recs := toRecords(eventValue.Records, shardID)
 
-					for _, record := range recs {
-						s.buffer <- record
+						for _, record := range recs {
+							s.buffer <- record
+						}
+					}
+				case <-ctx.Done():
+					return
+				// refresh the subscription after 5 minutes since that is when kinesis subscriptions go stale
+				case <-time.After(time.Minute*4 + time.Second*55):
+					for shardID, stream := range s.streamMap {
+						if stream != nil {
+							stream.Close()
+						}
+
+						err := s.resubscribeShard(ctx, shardID)
+						if err != nil {
+							sdk.Logger(ctx).Err(err).Msg("error resubscribing to shard")
+						}
 					}
 				}
 			}
 		}()
 	}
-
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(time.Minute * 5):
-		for shardID, stream := range s.streamMap {
-			if stream != nil {
-				stream.Close()
-			}
-
-			err := s.resubscribeShard(ctx, shardID)
-			if err != nil {
-				sdk.Logger(ctx).Err(err).Msg("error resubscribing to shard")
-			}
-		}
-	}
 }
 
-func (s *Source) subscribeShards(ctx context.Context) error {
+func (s *Source) subscribeShards(ctx context.Context, position sdk.Position) error {
 	// get shards
 	listShardsResponse, err := s.client.ListShards(ctx, &kinesis.ListShardsInput{
 		StreamARN: &s.config.StreamARN,
@@ -231,13 +239,20 @@ func (s *Source) subscribeShards(ctx context.Context) error {
 	}
 
 	var startingPosition types.StartingPosition
-	if s.config.StartFromLatest {
+	switch {
+	case s.config.StartFromLatest:
 		startingPosition.Type = types.ShardIteratorTypeLatest
-	} else {
+	case !s.config.StartFromLatest:
 		startingPosition.Type = types.ShardIteratorTypeTrimHorizon
-	}
+	case position != nil:
+		pos, err := parsePosition(position)
+		if err != nil {
+			return err
+		}
 
-	s.config.StartFromLatest = true
+		startingPosition.Type = types.ShardIteratorTypeAfterSequenceNumber
+		startingPosition.SequenceNumber = &pos.SequenceNumber
+	}
 
 	// get iterators for shards
 	for _, shard := range listShardsResponse.Shards {
@@ -271,4 +286,14 @@ func (s *Source) resubscribeShard(ctx context.Context, shardID string) error {
 	s.streamMap[shardID] = subscriptionResponse.GetStream()
 
 	return nil
+}
+
+func parsePosition(pos sdk.Position) (kinesisPosition, error) {
+	var kinPos kinesisPosition
+	err := json.Unmarshal(pos, &kinPos)
+	if err != nil {
+		return kinPos, err
+	}
+
+	return kinPos, nil
 }

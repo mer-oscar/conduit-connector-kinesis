@@ -100,11 +100,9 @@ func TestAcceptance(t *testing.T) {
 				"TestSource_Configure_RequiredParams",
 				"TestDestination_Configure_RequiredParams",
 				"TestSource_Open_ResumeAtPositionCDC",
-				"TestSource_Open_ResumeAtPositionSnapshot",
 			},
 			WriteTimeout: 500 * time.Millisecond,
-			// 3 second timeout to account for http strangeness
-			ReadTimeout: 3 * time.Second,
+			ReadTimeout:  3000 * time.Millisecond,
 		},
 	})
 }
