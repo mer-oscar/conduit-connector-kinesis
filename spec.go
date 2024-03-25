@@ -1,4 +1,4 @@
-package connectorname
+package kinesis
 
 import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
@@ -11,10 +11,10 @@ var version = "(devel)"
 // Specification returns the connector's specification.
 func Specification() sdk.Specification {
 	return sdk.Specification{
-		Name:        "connectorname",
-		Summary:     "<describe your connector>",
-		Description: "<describe your connector in detail>",
+		Name:        "kinesis",
+		Summary:     "A Conduit Connector for AWS Kinesis Data Streaming",
+		Description: "A source and destination connector for AWS Kinesis Data Streaming",
 		Version:     version,
-		Author:      "<your name>",
+		Author:      "Oscar Villavicencio",
 	}
 }

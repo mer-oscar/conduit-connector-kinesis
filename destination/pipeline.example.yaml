@@ -1,0 +1,17 @@
+version: 2.0
+pipelines:
+  - id: to-kinesis
+    status: running
+    description: >
+      {some source} -> Kinesis dst
+    connectors:
+      - id: dest-kinesis
+        type: destination
+        plugin: standalone:kinesis
+        settings:
+          streamARN: arn:aws:kinesis:us-east-1:000000000000:stream/stream-name
+          aws.region: us-east-1
+          aws.accessKeyId: accesskeymock
+          aws.secretAccessKey: accesssecretmock
+          # use the below config option to test with localstack
+          # aws.url: http://host.docker.internal:4566

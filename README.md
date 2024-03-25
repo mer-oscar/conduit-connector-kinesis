@@ -1,62 +1,48 @@
-# Conduit Connector Template
-This is a template project for building [Conduit](https://conduit.io) connectors in Go. It makes it possible to
-start working on a Conduit connector in a matter of seconds.
+# Conduit Connector for AWS Kinesis
+[Conduit](https://conduit.io) for [AWS Kinesis](https://aws.amazon.com/kinesis/).
 
-This template includes the following:
-* Skeleton code for the connector's configuration, source and destination
-* Example unit tests
-* A [Makefile](/Makefile) with commonly used targets
-* A GitHub workflow to [build the code and run the tests](/.github/workflows/build.yml)
-* A GitHub workflow to [run a pre-configured set of linters](/.github/workflows/lint.yml)
-* A GitHub workflow which [automatically creates a release](/.github/workflows/release.yml) once a tag is pushed
-* A [dependabot setup](/.github/dependabot.yml) which checks your dependencies for available updates and 
-[merges minor version upgrades](/.github/workflows/dependabot-auto-merge-go.yml) automatically
-* [Issue](/.github/ISSUE_TEMPLATE) and [PR templates](/.github/pull_request_template.md)
-* A [README template](/README_TEMPLATE.md)
+## How to build?
+Run `make build` to build the connector.
 
-### How to use
-* On this repository's main page, click "Use this template"
-* Enter the information about your repository
-* Once your repository has been generated, clone it
-* After cloning, run `./setup.sh <module name here>` (for example: 
-`./setup.sh github.com/awesome-org/conduit-connector-file`)
-* (Optional) Set the code owners (in the `CODEOWNERS` file)
+## Testing
+Run `make test-integration` to run the integration tests.
 
-With that, you're all set up and ready to start working on your connector! As a next step, we recommend that you 
-check out the [Conduit Connector SDK](https://github.com/ConduitIO/conduit-connector-sdk), which is the Go software 
-development kit for implementing a connector for Conduit.
+The Docker compose file at `test/docker-compose.yml` can be used to run the required resource (AWS Kinesis via Localstack) locally.
 
+## Source
+The Source connector for AWS Kinesis opens subscriptions to each of the available shards in the stream and pushes records into the buffer until
+the subscription is up to date (all present source records read), at which point it switches to capturing the latest events in the stream. Every 5 minutes (the lifetime of the subscription), the subscription to the shard is refreshed.
 
-### Repository settings
-Following is a list of repository settings we recommend having.
-
-#### General/Pull Requests
-1. Allow squash merging only.
-2. Always suggest updating pull request branches.
-3. Allow auto-merge.
-4. Automatically delete head branches.
-
-#### Branch protection rules
-Protect the default branch using the following rules:
-1. Require a pull request before merging. Require approvals.
-2. Require status checks to pass before merging. Require branches to be up to date before merging.
-3. Specify status checks that are required.
-4. Require conversation resolution before merging.
-5. Do not allow bypassing the above settings.
-
-#### Actions/General
-1. Allow all actions and reusable workflows.
-2. Allow GitHub Actions to create and approve pull requests (if dependabot is used and it's configured to automatically
-merge pull requests).
-
-### Specification
-The `spec.go` file provides a programmatic representation of the configuration options.
 
 ### Configuration
-This template provides two types of "configs":
-* general configuration (that applies to both, sources and destinations)
-* and source/destination specific configs.
 
-All are defined in `config.go` and are represented by separate types. General configs should be added to `connectorname.Config`,
-whereas any source or destination specific configs should be added to `connectorname.SourceConfig` and 
-`connectorname.DestinationConfig` respectively.
+| name                  | description                                      | required | default value |
+|-----------------------|--------------------------------------------------|----------|---------------|
+| `aws.accessKeyId`     | Access Key ID associated with your AWS resources | true     | ""            |
+| `aws.secretAccessKey` | Secret Access Key associated with your AWS resources | true     | ""            |
+| `aws.region`     | Region associated with your AWS resources | true     | ""            |
+| `streamName`     | The AWS Kinesis stream name | false     | ""            |
+| `streamARN`     | The AWS Kinesis stream ARN | true     | ""            |
+| `aws.url`     | (LOCAL TESTING ONLY) the url override to test with localstack | false     | ""            |
+| `startFromLatest`     | Set this value to true to ignore any records already in the stream  | false     | false           |
+
+
+## Destination
+The Destination connector for AWS Kinesis writes records to the stream either to a single shard or to multiple shards through the `useSingleShard` boolean configuration parameter. The size limit for a single record is 1MB, attempting to write a single record's data which is greater than 1MB will result in an error.
+
+### Configuration
+
+| name                       | description                                | required | default value |
+|----------------------------|--------------------------------------------|----------|---------------|
+| `aws.accessKeyId`     | Access Key ID associated with your AWS resources | true     | ""            |
+| `aws.secretAccessKey` | Secret Access Key associated with your AWS resources | true     | ""            |
+| `aws.region`     | Region associated with your AWS resources | true     | ""            |
+| `streamName`     | The AWS Kinesis stream name | false     | ""            |
+| `streamARN`     | The AWS Kinesis stream ARN | true     | ""            |
+| `aws.url`     | (LOCAL TESTING ONLY) the url override to test with localstack | false     | ""            |
+
+## Known Issues & Limitations
+
+
+## Planned work
+
